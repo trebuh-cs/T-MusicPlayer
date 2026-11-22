@@ -24,3 +24,6 @@ t-music-core = { path = "../../../crates/t-music-core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 uuid = { version = "1", features = ["v4"] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

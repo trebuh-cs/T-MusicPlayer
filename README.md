@@ -64,9 +64,7 @@ npm.cmd run build
 ### 2. Build Standalone Windows `.exe`
 ```powershell
 cd apps/desktop
-npm.cmd run build
-cd ..\..
-cargo build -p t-music-desktop --release
+npm.cmd run tauri -- build --no-bundle
 # Output: target/release/t-music-desktop.exe
 ```
 
