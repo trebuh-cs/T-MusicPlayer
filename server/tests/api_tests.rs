@@ -169,14 +169,86 @@ async fn multi_user_auth_upload_dedup_range_stream_and_two_way_sync() {
     assert_eq!(uploaded.title, "Neon Drive");
     assert_eq!(uploaded.artist, "TPX");
 
-    // Check hashes returns the uploaded hash.
+    // 3b. Private library isolation: Bob has NOT uploaded this file and Alice hasn't shared any playlist,
+    // so Bob sees 0 tracks and gets 403 Forbidden if attempting to stream Alice's private track.
+    let bob_initial_pull_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/sync/pull")
+                .header(header::AUTHORIZATION, format!("Bearer {}", auth_b.token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bob_initial_pull_resp.status(), StatusCode::OK);
+    let bob_initial_pull: SyncPullResponse =
+        serde_json::from_slice(&read_body_bytes(bob_initial_pull_resp).await).unwrap();
+    assert!(bob_initial_pull.tracks.is_empty());
+
+    let forbidden_stream_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/stream/{}?token={}", uploaded.id, auth_b.token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forbidden_stream_resp.status(), StatusCode::FORBIDDEN);
+
+    // 4. Alice streams her own track with HTTP Range (206 Partial Content).
+    let range_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/stream/{}?token={}", uploaded.id, auth_a.token))
+                .header(header::RANGE, "bytes=5-14")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(range_resp.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        range_resp
+            .headers()
+            .get(header::CONTENT_RANGE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "bytes 5-14/36"
+    );
+    assert_eq!(read_body_bytes(range_resp).await, b"FGHIJKLMNO");
+
+    // If a third user (Charlie) independently owns the identical file and checks its SHA-256 hash,
+    // the server deduplicates it on disk and links it to Charlie's private library.
+    let reg_c_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/register")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"username":"charlie","password":"password123","invite_code":"TEAM-INVITE"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reg_c_resp.status(), StatusCode::CREATED);
+    let auth_c: AuthResponse = serde_json::from_slice(&read_body_bytes(reg_c_resp).await).unwrap();
+
     let check_resp = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/api/v1/tracks/check-hashes")
-                .header(header::AUTHORIZATION, format!("Bearer {}", auth_b.token))
+                .header(header::AUTHORIZATION, format!("Bearer {}", auth_c.token))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&CheckHashesRequest {
@@ -197,29 +269,21 @@ async fn multi_user_auth_upload_dedup_range_stream_and_two_way_sync() {
     );
     assert!(!checked.existing.contains_key("missing_hash"));
 
-    // 4. HTTP Range streaming returns exact slice (206 Partial Content).
-    let range_resp = app
+    // Charlie now sees the deduplicated track in his own library and can stream it.
+    let pull_c_resp = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/api/v1/stream/{}?token={}", uploaded.id, auth_b.token))
-                .header(header::RANGE, "bytes=5-14")
+                .uri("/api/v1/sync/pull")
+                .header(header::AUTHORIZATION, format!("Bearer {}", auth_c.token))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(range_resp.status(), StatusCode::PARTIAL_CONTENT);
-    assert_eq!(
-        range_resp
-            .headers()
-            .get(header::CONTENT_RANGE)
-            .unwrap()
-            .to_str()
-            .unwrap(),
-        "bytes 5-14/36"
-    );
-    assert_eq!(read_body_bytes(range_resp).await, b"FGHIJKLMNO");
+    let pull_c: SyncPullResponse =
+        serde_json::from_slice(&read_body_bytes(pull_c_resp).await).unwrap();
+    assert_eq!(pull_c.tracks.len(), 1);
 
     // 5. Two-way sync & per-user playlist isolation + shared playlists + tombstones.
     let push_a = SyncPushRequest {

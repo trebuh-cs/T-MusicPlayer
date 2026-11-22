@@ -214,23 +214,23 @@ async fn me(
 
 async fn list_tracks(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
 ) -> Result<Json<Vec<ServerTrack>>, (StatusCode, String)> {
     state
         .db
-        .list_tracks()
+        .list_tracks_for_user(&auth.id)
         .map(Json)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
 }
 
 async fn check_hashes(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Json(req): Json<CheckHashesRequest>,
 ) -> Result<Json<CheckHashesResponse>, (StatusCode, String)> {
     let existing = state
         .db
-        .check_existing_hashes(&req.hashes)
+        .claim_existing_hashes_for_user(&auth.id, &req.hashes)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(CheckHashesResponse { existing }))
 }
@@ -342,6 +342,10 @@ fn finalize_uploaded_file(
         .get_track_by_hash(&content_hash)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
     {
+        state
+            .db
+            .link_track_to_user(user_id, &existing.id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
         let _ = fs::remove_file(&tmp_path);
         return Ok((StatusCode::OK, Json(existing)));
     }
@@ -429,7 +433,7 @@ fn session_dir_for_upload(data_dir: &Path, upload_id: &str) -> Result<PathBuf, (
 
 async fn upload_track_init(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Json(req): Json<UploadInitRequest>,
 ) -> Result<Json<UploadInitResponse>, (StatusCode, String)> {
     if req.content_hash.trim().is_empty() {
@@ -441,6 +445,10 @@ async fn upload_track_init(
         .get_track_by_hash(&req.content_hash)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
     {
+        state
+            .db
+            .link_track_to_user(&auth.id, &existing.id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
         return Ok(Json(UploadInitResponse {
             status: "exists".to_string(),
             upload_id: None,
@@ -583,13 +591,14 @@ async fn upload_track_complete(
 
 async fn scan_music_dir(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
 ) -> Result<Json<ScanResponse>, (StatusCode, String)> {
-    let added_or_existing = scan_server_music_directory(&state.db, &state.config.music_dir)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let added_or_existing =
+        scan_server_music_directory(&state.db, &state.config.music_dir, Some(&auth.id))
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let total_tracks = state
         .db
-        .list_tracks()
+        .list_tracks_for_user(&auth.id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
         .len();
     Ok(Json(ScanResponse {
@@ -598,21 +607,28 @@ async fn scan_music_dir(
     }))
 }
 
-/// Scans `music_dir` and inserts any tracks not yet present in `ServerDb`.
-pub fn scan_server_music_directory(db: &ServerDb, music_dir: &Path) -> Result<usize, String> {
+/// Scans `music_dir` and inserts any tracks not yet present in `ServerDb`, assigning them to `owner_user_id`.
+pub fn scan_server_music_directory(
+    db: &ServerDb,
+    music_dir: &Path,
+    owner_user_id: Option<&str>,
+) -> Result<usize, String> {
     let files = scan_directory(music_dir);
     let mut count = 0;
     for path in files {
         let Ok(hash) = compute_file_hash(&path) else {
             continue;
         };
-        if let Ok(Some(_)) = db.get_track_by_hash(&hash) {
+        if let Ok(Some(existing)) = db.get_track_by_hash(&hash) {
+            if let Some(uid) = owner_user_id {
+                let _ = db.link_track_to_user(uid, &existing.id);
+            }
             count += 1;
             continue;
         }
         if let Ok((scanned, cover)) = extract_track_metadata(&path) {
             if db
-                .insert_track_if_missing(&hash, &scanned, cover.as_ref(), None)
+                .insert_track_if_missing(&hash, &scanned, cover.as_ref(), owner_user_id)
                 .is_ok()
             {
                 count += 1;
@@ -624,11 +640,18 @@ pub fn scan_server_music_directory(db: &ServerDb, music_dir: &Path) -> Result<us
 
 async fn stream_track(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     AxumPath(track_id): AxumPath<String>,
     Query(query): Query<StreamQuery>,
     headers: HeaderMap,
 ) -> Response {
+    let Ok(allowed) = state.db.user_can_access_track(&auth.id, &track_id) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Access check failed").into_response();
+    };
+    if !allowed {
+        return (StatusCode::FORBIDDEN, "Access denied").into_response();
+    }
+
     let Ok(Some(stored)) = state.db.get_track_for_stream(&track_id) else {
         return (StatusCode::NOT_FOUND, "Track not found").into_response();
     };
@@ -1080,7 +1103,7 @@ async fn downloads_page(State(state): State<AppState>) -> Html<String> {
       <ol>
         <li>Tap <strong>Download Android APK</strong> above and open the downloaded file (allow your browser to install apps if Android prompts).</li>
         <li>Open <strong>T - MusicPlayer</strong> and paste the Server URL shown above.</li>
-        <li>Tap <strong>Create Account</strong> (or Sign In) to sync the shared music library and save playlists offline. {invite_note}</li>
+        <li>Tap <strong>Create Account</strong> (or Sign In) to sync your private music library and save playlists offline. {invite_note}</li>
       </ol>
     </section>
   </main>

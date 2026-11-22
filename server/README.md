@@ -3,8 +3,8 @@
 Lightweight, multi-user Rust media & sync server powered by **Axum**, **SQLite**, **Argon2id**, and **JWT**, designed to run in Docker alongside your existing services behind a **Cloudflare Tunnel**.
 
 ## Features
-- **Multi-User Accounts**: Per-user libraries/playlists/favorites, optional `INVITE_CODE` for friends, and `is_shared` collaborative playlists.
-- **Content-Hash Deduplication**: Uploads are SHA-256 deduplicated (`/api/v1/tracks/check-hashes`), so identical songs aren't stored twice.
+- **Private Multi-User Libraries**: Each account has its own private tracks, playlists, and favorites (with optional `INVITE_CODE` for friends and explicit `is_shared` playlists when you want to share a mix).
+- **Content-Hash Deduplication**: Uploads are SHA-256 deduplicated (`/api/v1/tracks/check-hashes`), so identical songs uploaded by multiple users are only stored once on disk while keeping libraries isolated.
 - **Best Audio Quality**: Direct HTTP `Range` (`206 Partial Content`) original-quality streaming (FLAC/MP3/Opus/WAV/M4A) + offline download support (`?download=1`), plus optional `?quality=saver` 160kbps Opus transcoding via FFmpeg.
 - **Two-Way Delta Sync**: Last-write-wins sync for playlists (including track ordering & deletion tombstones) and favorites across Windows PC and Pixel Android.
 

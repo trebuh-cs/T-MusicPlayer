@@ -1,6 +1,6 @@
 //! Local SQLite persistence for tracks, deduplicated covers, playlists, radio favorites, and settings.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -988,6 +988,40 @@ impl Database {
         Ok(true)
     }
 
+    /// Removes remote-only tracks (`is_remote = 1`) that are no longer in the user's server library.
+    pub fn prune_remote_tracks_not_in(&self, valid_server_ids: &[String]) -> Result<usize, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let valid: HashSet<&str> = valid_server_ids.iter().map(String::as_str).collect();
+        let mut stmt = conn
+            .prepare("SELECT id, server_track_id FROM tracks WHERE is_remote = 1")
+            .map_err(|e| e.to_string())?;
+        let remote_rows = collect_rows(&mut stmt, [], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        drop(stmt);
+
+        let mut removed = 0usize;
+        for (local_id, srv_id) in remote_rows {
+            let keep = srv_id.as_deref().is_some_and(|sid| valid.contains(sid));
+            if !keep {
+                conn.execute("DELETE FROM tracks WHERE id = ?1", params![local_id])
+                    .map_err(|e| e.to_string())?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Removes cached remote tracks and clears `server_track_id` links when signing out.
+    pub fn clear_remote_tracks(&self) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM tracks WHERE is_remote = 1", [])
+            .map_err(|e| e.to_string())?;
+        conn.execute("UPDATE tracks SET server_track_id = NULL WHERE is_remote = 0", [])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// Applies a playlist snapshot pulled from the server using last-write-wins.
     pub fn apply_remote_playlist_sync(&self, pl: &SyncPlaylistPayload) -> Result<bool, String> {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
@@ -1428,5 +1462,10 @@ mod tests {
         };
         assert!(db.apply_remote_favorite_sync(&fav).unwrap());
         assert!(db.get_library_snapshot().unwrap().tracks[0].is_favorite);
+
+        // Pruning remote tracks removes stale server entries without touching local files.
+        let removed = db.prune_remote_tracks_not_in(&[]).unwrap();
+        assert_eq!(removed, 1);
+        assert!(db.get_library_snapshot().unwrap().tracks.is_empty());
     }
 }

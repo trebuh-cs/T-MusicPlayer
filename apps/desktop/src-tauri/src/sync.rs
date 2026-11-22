@@ -200,11 +200,12 @@ pub async fn register(
     Ok(auth)
 }
 
-/// Clears saved server auth session keys (keeps server URL for convenience).
+/// Clears saved server auth session keys and removes cached remote tracks from the previous account.
 pub fn logout(db: &Database) -> Result<(), String> {
     db.delete_setting("server_token")?;
     db.delete_setting("server_username")?;
     db.delete_setting("server_role")?;
+    db.clear_remote_tracks()?;
     Ok(())
 }
 
@@ -739,6 +740,7 @@ async fn sync_library_inner(app: &AppHandle, db: &Database) -> Result<SyncSummar
 
     let mut pulled_tracks = 0;
     let mut missing_covers = HashSet::new();
+    let pulled_server_ids: Vec<String> = pulled.tracks.iter().map(|t| t.id.clone()).collect();
     for srv_track in &pulled.tracks {
         if db.upsert_remote_track(srv_track)? {
             pulled_tracks += 1;
@@ -749,6 +751,7 @@ async fn sync_library_inner(app: &AppHandle, db: &Database) -> Result<SyncSummar
             }
         }
     }
+    let _ = db.prune_remote_tracks_not_in(&pulled_server_ids)?;
 
     let total_covers = missing_covers.len();
     for (cover_idx, cover_hash) in missing_covers.into_iter().enumerate() {

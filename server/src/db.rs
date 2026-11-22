@@ -114,7 +114,19 @@ impl ServerDb {
                 is_favorite INTEGER NOT NULL DEFAULT 0,
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY (user_id, track_id)
-            );",
+            );
+
+            CREATE TABLE IF NOT EXISTS user_tracks (
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+                added_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, track_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_user_tracks_user ON user_tracks(user_id);
+
+            INSERT OR IGNORE INTO user_tracks (user_id, track_id, added_at)
+            SELECT uploaded_by, id, created_at FROM tracks WHERE uploaded_by IS NOT NULL;",
         )
         .map_err(|e| format!("Failed to initialize server schema: {e}"))?;
         Ok(())
@@ -231,15 +243,49 @@ impl ServerDb {
         .map_err(|e| e.to_string())
     }
 
-    /// Maps existing `content_hash` values to server `track_id`s.
-    pub fn check_existing_hashes(
+    /// Looks up the first admin user's ID (used to assign host-scanned `MUSIC_DIR` tracks).
+    pub fn get_first_admin_user_id(&self) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT id FROM users WHERE role = 'admin' ORDER BY created_at ASC LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+    }
+
+    /// Associates a track with a user's private library (`user_tracks`).
+    pub fn link_track_to_user(&self, user_id: &str, track_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let now = Utc::now().timestamp();
+        conn.execute(
+            "INSERT OR IGNORE INTO user_tracks (user_id, track_id, added_at)
+             VALUES (?1, ?2, ?3)",
+            params![user_id, track_id, now],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Maps existing `content_hash` values to server `track_id`s and links matched tracks
+    /// into `user_id`'s private library (preserving SHA-256 disk deduplication across users).
+    pub fn claim_existing_hashes_for_user(
         &self,
+        user_id: &str,
         hashes: &[String],
     ) -> Result<HashMap<String, String>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare("SELECT id FROM tracks WHERE content_hash = ?1")
             .map_err(|e| e.to_string())?;
+        let mut link_stmt = conn
+            .prepare(
+                "INSERT OR IGNORE INTO user_tracks (user_id, track_id, added_at)
+                 VALUES (?1, ?2, ?3)",
+            )
+            .map_err(|e| e.to_string())?;
+        let now = Utc::now().timestamp();
         let mut out = HashMap::new();
         for hash in hashes {
             if let Some(id) = stmt
@@ -247,10 +293,40 @@ impl ServerDb {
                 .optional()
                 .map_err(|e| e.to_string())?
             {
+                link_stmt
+                    .execute(params![user_id, &id, now])
+                    .map_err(|e| e.to_string())?;
                 out.insert(hash.clone(), id);
             }
         }
         Ok(out)
+    }
+
+    /// Returns true if `user_id` owns the track or can view it via a non-deleted shared playlist.
+    pub fn user_can_access_track(&self, user_id: &str, track_id: &str) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let allowed = conn
+            .query_row(
+                "SELECT 1 FROM tracks t
+                 WHERE t.id = ?1
+                   AND (
+                       EXISTS (
+                           SELECT 1 FROM user_tracks ut
+                           WHERE ut.track_id = t.id AND ut.user_id = ?2
+                       )
+                       OR EXISTS (
+                           SELECT 1 FROM playlist_tracks pt
+                           INNER JOIN playlists p ON p.id = pt.playlist_id
+                           WHERE pt.track_id = t.id AND p.is_shared = 1 AND p.deleted = 0
+                       )
+                   )",
+                params![track_id, user_id],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(false);
+        Ok(allowed)
     }
 
     /// Fetches a track by `content_hash`.
@@ -284,7 +360,7 @@ impl ServerDb {
         .map_err(|e| e.to_string())
     }
 
-    /// Inserts or returns an existing track deduplicated by `content_hash`.
+    /// Inserts or returns an existing track deduplicated by `content_hash`, linking it to `uploaded_by_user_id`.
     pub fn insert_track_if_missing(
         &self,
         content_hash: &str,
@@ -293,6 +369,9 @@ impl ServerDb {
         uploaded_by_user_id: Option<&str>,
     ) -> Result<ServerTrack, String> {
         if let Some(existing) = self.get_track_by_hash(content_hash)? {
+            if let Some(uid) = uploaded_by_user_id {
+                self.link_track_to_user(uid, &existing.id)?;
+            }
             return Ok(existing);
         }
 
@@ -340,24 +419,42 @@ impl ServerDb {
         )
         .map_err(|e| e.to_string())?;
 
+        if let Some(uid) = uploaded_by_user_id {
+            conn.execute(
+                "INSERT OR IGNORE INTO user_tracks (user_id, track_id, added_at)
+                 VALUES (?1, ?2, ?3)",
+                params![uid, id, now],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
         drop(conn);
         self.get_track_by_hash(content_hash)?
             .ok_or_else(|| "Failed to load newly inserted track".to_string())
     }
 
-    /// Lists all server tracks ordered alphabetically.
-    pub fn list_tracks(&self) -> Result<Vec<ServerTrack>, String> {
+    /// Lists tracks visible to `user_id` (private user library + tracks inside shared playlists).
+    pub fn list_tracks_for_user(&self, user_id: &str) -> Result<Vec<ServerTrack>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(&format!(
                 "{SERVER_TRACK_SELECT}
+                 WHERE EXISTS (
+                     SELECT 1 FROM user_tracks ut
+                     WHERE ut.track_id = t.id AND ut.user_id = ?1
+                 )
+                 OR EXISTS (
+                     SELECT 1 FROM playlist_tracks pt
+                     INNER JOIN playlists p ON p.id = pt.playlist_id
+                     WHERE pt.track_id = t.id AND p.is_shared = 1 AND p.deleted = 0
+                 )
                  ORDER BY LOWER(t.artist) ASC, LOWER(t.album) ASC,
                           COALESCE(t.disc_number, 1) ASC, COALESCE(t.track_number, 9999) ASC,
                           LOWER(t.title) ASC"
             ))
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map([], map_server_track_row)
+            .query_map(params![user_id], map_server_track_row)
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
@@ -376,9 +473,9 @@ impl ServerDb {
         .map_err(|e| e.to_string())
     }
 
-    /// Pulls complete library, user-owned + shared playlists, and user's favorites.
+    /// Pulls the user's private library (+ shared playlist tracks), user-owned + shared playlists, and user's favorites.
     pub fn pull_sync(&self, user_id: &str) -> Result<SyncPullResponse, String> {
-        let tracks = self.list_tracks()?;
+        let tracks = self.list_tracks_for_user(user_id)?;
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
         let mut pl_stmt = conn

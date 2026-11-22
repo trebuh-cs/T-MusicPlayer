@@ -22,8 +22,9 @@ async fn main() {
     let db = ServerDb::open(&db_path).expect("Failed to open server SQLite database");
     let state = AppState::initialize(config, db).expect("Failed to initialize server state");
 
+    let admin_id = state.db.get_first_admin_user_id().ok().flatten();
     if let Ok(scanned) =
-        scan_server_music_directory(&state.db, &state.config.music_dir)
+        scan_server_music_directory(&state.db, &state.config.music_dir, admin_id.as_deref())
     {
         tracing::info!(
             "Indexed {scanned} track(s) from {}",
