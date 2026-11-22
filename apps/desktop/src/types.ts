@@ -18,6 +18,17 @@ export interface Track {
   play_count: number;
   is_favorite: boolean;
   added_at: number;
+  edit_speed: number;
+  edit_gain_db: number;
+  trim_start_ms: number;
+  trim_end_ms: number | null;
+}
+
+export interface TrackEditDraft {
+  speed: number;
+  gain_db: number;
+  trim_start_ms: number;
+  trim_end_ms: number | null;
 }
 
 export interface Playlist {

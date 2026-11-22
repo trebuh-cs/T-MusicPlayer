@@ -28,11 +28,22 @@ data class TrackEntity(
     val createdAt: Long = 0L,
     val isFavorite: Boolean = false,
     val favoriteUpdatedAt: Long = 0L,
+    val editSpeed: Float = 1.0f,
+    val editGainDb: Float = 0.0f,
+    val trimStartMs: Long = 0L,
+    val trimEndMs: Long? = null,
+    val editUpdatedAt: Long = 0L,
     val localAudioPath: String? = null,
     val localCoverPath: String? = null,
 ) {
     val isDownloaded: Boolean
         get() = !localAudioPath.isNullOrBlank()
+
+    val hasCustomEdit: Boolean
+        get() = kotlin.math.abs(editSpeed - 1.0f) > 0.01f ||
+            kotlin.math.abs(editGainDb) > 0.05f ||
+            trimStartMs > 0L ||
+            trimEndMs != null
 }
 
 @Entity(tableName = "playlists")

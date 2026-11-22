@@ -104,6 +104,26 @@ export const api = {
   syncWithServer: () => invoke<SyncSummary>("sync_with_server"),
   uploadAppDownload: (platform: "android" | "windows", filePath: string) =>
     invoke<string>("upload_app_download", { platform, filePath }),
+  saveTrackEdit: (
+    trackId: string,
+    speed: number,
+    gainDb: number,
+    trimStartMs: number,
+    trimEndMs: number | null
+  ) =>
+    invoke<Track>("save_track_edit", {
+      trackId,
+      speed,
+      gainDb,
+      trimStartMs,
+      trimEndMs,
+    }),
+  resetTrackEdit: (trackId: string) =>
+    invoke<Track>("reset_track_edit", { trackId }),
+  revealTrackInExplorer: (trackId: string) =>
+    invoke<void>("reveal_track_in_explorer", { trackId }),
+  exportTrackAsMp3: (trackId: string, destPath: string) =>
+    invoke<string>("export_track_as_mp3", { trackId, destPath }),
 };
 
 // Legal Internet Radio discovery via public Radio Browser mirrors.

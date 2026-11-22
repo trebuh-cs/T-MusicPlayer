@@ -8,7 +8,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use t_music_core::models::{
     ScannedTrack, ServerTrack, SyncFavoritePayload, SyncPlaylistPayload, SyncPullResponse,
-    SyncPushRequest, SyncPushResponse, UserProfile,
+    SyncPushRequest, SyncPushResponse, SyncTrackEditPayload, UserProfile,
 };
 use t_music_core::scanner::ExtractedCover;
 use uuid::Uuid;
@@ -124,6 +124,17 @@ impl ServerDb {
             );
 
             CREATE INDEX IF NOT EXISTS idx_user_tracks_user ON user_tracks(user_id);
+
+            CREATE TABLE IF NOT EXISTS user_track_edits (
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+                speed REAL NOT NULL DEFAULT 1.0,
+                gain_db REAL NOT NULL DEFAULT 0.0,
+                trim_start_ms INTEGER NOT NULL DEFAULT 0,
+                trim_end_ms INTEGER,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, track_id)
+            );
 
             INSERT OR IGNORE INTO user_tracks (user_id, track_id, added_at)
             SELECT uploaded_by, id, created_at FROM tracks WHERE uploaded_by IS NOT NULL;",
@@ -555,15 +566,38 @@ impl ServerDb {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
 
+        let mut edit_stmt = conn
+            .prepare(
+                "SELECT track_id, speed, gain_db, trim_start_ms, trim_end_ms, updated_at
+                 FROM user_track_edits WHERE user_id = ?1",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let track_edits = edit_stmt
+            .query_map(params![user_id], |row| {
+                Ok(SyncTrackEditPayload {
+                    track_id: row.get(0)?,
+                    speed: row.get::<_, f64>(1)? as f32,
+                    gain_db: row.get::<_, f64>(2)? as f32,
+                    trim_start_ms: row.get::<_, i64>(3)?.max(0) as u64,
+                    trim_end_ms: row.get::<_, Option<i64>>(4)?.map(|v| v.max(0) as u64),
+                    updated_at: row.get(5)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+
         Ok(SyncPullResponse {
             server_time: Utc::now().timestamp(),
             tracks,
             playlists,
             favorites,
+            track_edits,
         })
     }
 
-    /// Merges playlist edits/deletions (owned by caller) and favorites using last-write-wins.
+    /// Merges playlist edits/deletions (owned by caller), favorites, and per-track edits using last-write-wins.
     pub fn push_sync(
         &self,
         user_id: &str,
@@ -573,6 +607,7 @@ impl ServerDb {
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         let mut applied_playlists = 0;
         let mut applied_favorites = 0;
+        let mut applied_track_edits = 0;
 
         for pl in &req.playlists {
             let existing: Option<(String, i64)> = tx
@@ -699,12 +734,68 @@ impl ServerDb {
             applied_favorites += 1;
         }
 
+        for edit in &req.track_edits {
+            let track_exists: bool = tx
+                .query_row(
+                    "SELECT 1 FROM tracks WHERE id = ?1",
+                    params![edit.track_id],
+                    |_| Ok(true),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?
+                .unwrap_or(false);
+            if !track_exists {
+                continue;
+            }
+
+            let existing_ts: Option<i64> = tx
+                .query_row(
+                    "SELECT updated_at FROM user_track_edits WHERE user_id = ?1 AND track_id = ?2",
+                    params![user_id, edit.track_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+
+            if existing_ts.is_some_and(|ts| edit.updated_at < ts) {
+                continue;
+            }
+
+            let speed = edit.speed.clamp(0.5, 2.0) as f64;
+            let gain_db = edit.gain_db.clamp(-18.0, 12.0) as f64;
+            let trim_start = edit.trim_start_ms as i64;
+            let trim_end = edit.trim_end_ms.map(|v| v as i64);
+
+            tx.execute(
+                "INSERT INTO user_track_edits (user_id, track_id, speed, gain_db, trim_start_ms, trim_end_ms, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(user_id, track_id) DO UPDATE SET
+                    speed = excluded.speed,
+                    gain_db = excluded.gain_db,
+                    trim_start_ms = excluded.trim_start_ms,
+                    trim_end_ms = excluded.trim_end_ms,
+                    updated_at = excluded.updated_at",
+                params![
+                    user_id,
+                    edit.track_id,
+                    speed,
+                    gain_db,
+                    trim_start,
+                    trim_end,
+                    edit.updated_at,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            applied_track_edits += 1;
+        }
+
         tx.commit().map_err(|e| e.to_string())?;
 
         Ok(SyncPushResponse {
             server_time: Utc::now().timestamp(),
             applied_playlists,
             applied_favorites,
+            applied_track_edits,
         })
     }
 }

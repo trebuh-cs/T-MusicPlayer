@@ -68,6 +68,10 @@ pub fn run() {
             commands::server_logout,
             commands::sync_with_server,
             commands::upload_app_download,
+            commands::save_track_edit,
+            commands::reset_track_edit,
+            commands::reveal_track_in_explorer,
+            commands::export_track_as_mp3,
         ])
         .run(tauri::generate_context!())
         .expect("error while running T - MusicPlayer");

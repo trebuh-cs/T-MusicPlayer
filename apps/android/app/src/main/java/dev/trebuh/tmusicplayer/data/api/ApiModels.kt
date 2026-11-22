@@ -79,17 +79,29 @@ data class SyncFavoriteDto(
 )
 
 @Serializable
+data class SyncTrackEditDto(
+    @SerialName("track_id") val trackId: String,
+    val speed: Float = 1.0f,
+    @SerialName("gain_db") val gainDb: Float = 0.0f,
+    @SerialName("trim_start_ms") val trimStartMs: Long = 0L,
+    @SerialName("trim_end_ms") val trimEndMs: Long? = null,
+    @SerialName("updated_at") val updatedAt: Long = 0L,
+)
+
+@Serializable
 data class SyncPullResponseDto(
     @SerialName("server_time") val serverTime: Long = 0L,
     val tracks: List<ServerTrackDto> = emptyList(),
     val playlists: List<SyncPlaylistDto> = emptyList(),
     val favorites: List<SyncFavoriteDto> = emptyList(),
+    @SerialName("track_edits") val trackEdits: List<SyncTrackEditDto> = emptyList(),
 )
 
 @Serializable
 data class SyncPushRequestDto(
     val playlists: List<SyncPlaylistDto>,
     val favorites: List<SyncFavoriteDto>,
+    @SerialName("track_edits") val trackEdits: List<SyncTrackEditDto> = emptyList(),
 )
 
 @Serializable
@@ -97,6 +109,7 @@ data class SyncPushResponseDto(
     @SerialName("server_time") val serverTime: Long = 0L,
     @SerialName("applied_playlists") val appliedPlaylists: Int = 0,
     @SerialName("applied_favorites") val appliedFavorites: Int = 0,
+    @SerialName("applied_track_edits") val appliedTrackEdits: Int = 0,
 )
 
 @Serializable

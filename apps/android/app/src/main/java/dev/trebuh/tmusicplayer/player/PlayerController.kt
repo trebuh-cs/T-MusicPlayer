@@ -3,11 +3,13 @@ package dev.trebuh.tmusicplayer.player
 import android.content.ComponentName
 import android.content.Context
 import android.net.Uri
+import android.os.Bundle
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
+import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
 import dev.trebuh.tmusicplayer.data.db.TrackEntity
 import dev.trebuh.tmusicplayer.data.sync.SyncRepository
@@ -66,6 +68,8 @@ class PlayerController(
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            val activeTrack = resolveActiveTrack()
+            applyPerTrackOverrides(controller, activeTrack)
             syncStateFromPlayer()
         }
 
@@ -78,7 +82,7 @@ class PlayerController(
         }
 
         override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
-            _state.update { it.copy(playbackRate = playbackParameters.speed) }
+            _state.update { it.copy(playbackRate = repository.settings.value.playbackRate) }
         }
     }
 
@@ -105,6 +109,32 @@ class PlayerController(
         }.getOrNull()
     }
 
+    private fun resolveActiveTrack(): TrackEntity? {
+        val ctrl = controller
+        val idx = ctrl?.currentMediaItemIndex ?: -1
+        val mediaId = ctrl?.currentMediaItem?.mediaId
+        return currentQueue.firstOrNull { it.id == mediaId } ?: currentQueue.getOrNull(idx)
+    }
+
+    private fun applyPerTrackOverrides(ctrl: MediaController?, track: TrackEntity?) {
+        if (ctrl == null) return
+        val globalRate = repository.settings.value.playbackRate
+        val trackSpeed = track?.editSpeed?.takeIf { it > 0f } ?: 1.0f
+        val effectiveRate = (globalRate * trackSpeed).coerceIn(0.5f, 2.0f)
+        ctrl.setPlaybackParameters(PlaybackParameters(effectiveRate, 1.0f))
+
+        val gainDb = (track?.editGainDb ?: 0f).coerceIn(-18f, 12f)
+        val args = Bundle().apply {
+            putFloat(TMusicPlaybackService.EXTRA_GAIN_DB, gainDb)
+        }
+        runCatching {
+            ctrl.sendCustomCommand(
+                SessionCommand(TMusicPlaybackService.ACTION_SET_TRACK_GAIN, Bundle.EMPTY),
+                args,
+            )
+        }
+    }
+
     fun playQueue(tracks: List<TrackEntity>, startIndex: Int = 0) {
         if (tracks.isEmpty()) return
         val safeIndex = startIndex.coerceIn(0, tracks.lastIndex)
@@ -123,11 +153,24 @@ class PlayerController(
                         if (artworkUri != null) setArtworkUri(artworkUri)
                     }
                     .build()
-                MediaItem.Builder()
+                val builder = MediaItem.Builder()
                     .setMediaId(track.id)
                     .setUri(uri)
                     .setMediaMetadata(metadata)
-                    .build() to track
+
+                // Non-destructive front/end trim applied directly in Media3 ExoPlayer pipeline.
+                val startMs = track.trimStartMs.coerceAtLeast(0L)
+                val endMs = track.trimEndMs
+                if (startMs > 0L || (endMs != null && endMs > startMs)) {
+                    val clip = MediaItem.ClippingConfiguration.Builder()
+                        .setStartPositionMs(startMs)
+                    if (endMs != null && endMs > startMs) {
+                        clip.setEndPositionMs(endMs)
+                    }
+                    builder.setClippingConfiguration(clip.build())
+                }
+
+                builder.build() to track
             }
 
             if (playableItems.isEmpty()) return@launch
@@ -136,7 +179,7 @@ class PlayerController(
             val resolvedIndex = currentQueue.indexOfFirst { it.id == startTrackId }.coerceAtLeast(0)
 
             ctrl.setMediaItems(playableItems.map { it.first }, resolvedIndex, 0L)
-            ctrl.setPlaybackParameters(PlaybackParameters(repository.settings.value.playbackRate, 1.0f))
+            applyPerTrackOverrides(ctrl, currentQueue.getOrNull(resolvedIndex))
             ctrl.prepare()
             ctrl.play()
             syncStateFromPlayer()
@@ -186,11 +229,11 @@ class PlayerController(
         syncStateFromPlayer()
     }
 
-    /** Pitch-preserved playback speed: pitch stays locked at 1.0f. */
+    /** Pitch-preserved global playback speed combined with active track's per-track default speed. */
     fun setPlaybackRate(rate: Float) {
         val clamped = rate.coerceIn(0.5f, 2.0f)
         repository.prefs.setPlaybackRate(clamped)
-        controller?.setPlaybackParameters(PlaybackParameters(clamped, 1.0f))
+        applyPerTrackOverrides(controller, resolveActiveTrack())
         _state.update { it.copy(playbackRate = clamped) }
     }
 
@@ -198,6 +241,7 @@ class PlayerController(
         if (currentQueue.isEmpty()) return
         val byId = updatedTracks.associateBy { it.id }
         currentQueue = currentQueue.map { byId[it.id] ?: it }
+        applyPerTrackOverrides(controller, resolveActiveTrack())
         syncStateFromPlayer()
     }
 
@@ -256,9 +300,7 @@ class PlayerController(
     private fun syncStateFromPlayer() {
         val ctrl = controller
         val idx = ctrl?.currentMediaItemIndex ?: -1
-        val mediaId = ctrl?.currentMediaItem?.mediaId
-        val activeTrack = currentQueue.firstOrNull { it.id == mediaId }
-            ?: currentQueue.getOrNull(idx)
+        val activeTrack = resolveActiveTrack()
         val rawDuration = ctrl?.duration ?: 0L
         val durationMs = if (rawDuration > 0L) rawDuration else (activeTrack?.durationMs ?: 0L)
         _state.update {
@@ -271,7 +313,7 @@ class PlayerController(
                 durationMs = durationMs,
                 shuffleEnabled = ctrl?.shuffleModeEnabled == true,
                 repeatMode = ctrl?.repeatMode ?: Player.REPEAT_MODE_OFF,
-                playbackRate = ctrl?.playbackParameters?.speed ?: repository.settings.value.playbackRate,
+                playbackRate = repository.settings.value.playbackRate,
                 isBuffering = ctrl?.playbackState == Player.STATE_BUFFERING,
             )
         }

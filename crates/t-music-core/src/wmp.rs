@@ -562,6 +562,10 @@ mod tests {
             play_count: 0,
             is_favorite: false,
             added_at: 0,
+            edit_speed: 1.0,
+            edit_gain_db: 0.0,
+            trim_start_ms: 0,
+            trim_end_ms: None,
         };
         let exported = export_m3u8("Deep Focus", &[track]);
         assert!(exported.starts_with("#EXTM3U\n#PLAYLIST:Deep Focus\n#EXTINF:215,Lofi Artist - Focus Flow\n"));

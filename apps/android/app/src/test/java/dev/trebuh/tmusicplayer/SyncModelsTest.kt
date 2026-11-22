@@ -55,6 +55,16 @@ class SyncModelsTest {
                   "is_favorite": true,
                   "updated_at": 1763809500
                 }
+              ],
+              "track_edits": [
+                {
+                  "track_id": "track-1",
+                  "speed": 1.2,
+                  "gain_db": 4.0,
+                  "trim_start_ms": 2500,
+                  "trim_end_ms": 180000,
+                  "updated_at": 1763809600
+                }
               ]
             }
         """.trimIndent()
@@ -65,6 +75,11 @@ class SyncModelsTest {
         assertEquals("flac", parsed.tracks[0].format)
         assertEquals("track-1", parsed.playlists[0].trackIds[0])
         assertTrue(parsed.favorites[0].isFavorite)
+        assertEquals(1, parsed.trackEdits.size)
+        assertEquals(1.2f, parsed.trackEdits[0].speed, 0.001f)
+        assertEquals(4.0f, parsed.trackEdits[0].gainDb, 0.001f)
+        assertEquals(2500L, parsed.trackEdits[0].trimStartMs)
+        assertEquals(180000L, parsed.trackEdits[0].trimEndMs)
     }
 
     @Test

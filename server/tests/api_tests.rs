@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use t_music_core::models::{
     AuthResponse, CheckHashesRequest, CheckHashesResponse, ServerHealth, ServerTrack,
     SyncFavoritePayload, SyncPlaylistPayload, SyncPullResponse, SyncPushRequest,
+    SyncTrackEditPayload,
 };
 use t_music_server::config::ServerConfig;
 use t_music_server::db::ServerDb;
@@ -314,6 +315,14 @@ async fn multi_user_auth_upload_dedup_range_stream_and_two_way_sync() {
             is_favorite: true,
             updated_at: 100,
         }],
+        track_edits: vec![SyncTrackEditPayload {
+            track_id: uploaded.id.clone(),
+            speed: 1.25,
+            gain_db: 3.5,
+            trim_start_ms: 4000,
+            trim_end_ms: Some(120000),
+            updated_at: 100,
+        }],
     };
     let push_a_resp = app
         .clone()
@@ -332,6 +341,27 @@ async fn multi_user_auth_upload_dedup_range_stream_and_two_way_sync() {
     let push_val: Value = serde_json::from_slice(&read_body_bytes(push_a_resp).await).unwrap();
     assert_eq!(push_val["applied_playlists"], 2);
     assert_eq!(push_val["applied_favorites"], 1);
+    assert_eq!(push_val["applied_track_edits"], 1);
+
+    // Alice pulls her own edit back cleanly.
+    let pull_a_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/sync/pull")
+                .header(header::AUTHORIZATION, format!("Bearer {}", auth_a.token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let pull_a: SyncPullResponse =
+        serde_json::from_slice(&read_body_bytes(pull_a_resp).await).unwrap();
+    assert_eq!(pull_a.track_edits.len(), 1);
+    assert!((pull_a.track_edits[0].speed - 1.25).abs() < 0.001);
+    assert!((pull_a.track_edits[0].gain_db - 3.5).abs() < 0.001);
+    assert_eq!(pull_a.track_edits[0].trim_start_ms, 4000);
+    assert_eq!(pull_a.track_edits[0].trim_end_ms, Some(120000));
 
     // Bob pulls: sees the shared playlist and shared tracks, NOT Alice's private playlist or favorite.
     let pull_b_resp = app
@@ -375,6 +405,7 @@ async fn multi_user_auth_upload_dedup_range_stream_and_two_way_sync() {
                             deleted: true,
                         }],
                         favorites: vec![],
+                        track_edits: vec![],
                     })
                     .unwrap(),
                 ))

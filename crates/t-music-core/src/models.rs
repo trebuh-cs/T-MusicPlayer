@@ -4,8 +4,12 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+fn default_edit_speed() -> f32 {
+    1.0
+}
+
 /// A locally indexed or synced audio track.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Track {
     pub id: String,
     pub file_path: String,
@@ -26,6 +30,14 @@ pub struct Track {
     pub play_count: u64,
     pub is_favorite: bool,
     pub added_at: i64,
+    #[serde(default = "default_edit_speed")]
+    pub edit_speed: f32,
+    #[serde(default)]
+    pub edit_gain_db: f32,
+    #[serde(default)]
+    pub trim_start_ms: u64,
+    #[serde(default)]
+    pub trim_end_ms: Option<u64>,
 }
 
 /// Raw metadata extracted from an audio file before database assignment.
@@ -197,20 +209,35 @@ pub struct SyncFavoritePayload {
     pub updated_at: i64,
 }
 
+/// Non-destructive per-track playback defaults (speed, loudness gain, trim start/end) synced per user.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SyncTrackEditPayload {
+    pub track_id: String,
+    pub speed: f32,
+    pub gain_db: f32,
+    pub trim_start_ms: u64,
+    pub trim_end_ms: Option<u64>,
+    pub updated_at: i64,
+}
+
 /// Response returned by `GET /api/v1/sync/pull`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SyncPullResponse {
     pub server_time: i64,
     pub tracks: Vec<ServerTrack>,
     pub playlists: Vec<SyncPlaylistPayload>,
     pub favorites: Vec<SyncFavoritePayload>,
+    #[serde(default)]
+    pub track_edits: Vec<SyncTrackEditPayload>,
 }
 
 /// Request sent to `POST /api/v1/sync/push`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SyncPushRequest {
     pub playlists: Vec<SyncPlaylistPayload>,
     pub favorites: Vec<SyncFavoritePayload>,
+    #[serde(default)]
+    pub track_edits: Vec<SyncTrackEditPayload>,
 }
 
 /// Response returned by `POST /api/v1/sync/push`.
@@ -219,6 +246,8 @@ pub struct SyncPushResponse {
     pub server_time: i64,
     pub applied_playlists: usize,
     pub applied_favorites: usize,
+    #[serde(default)]
+    pub applied_track_edits: usize,
 }
 
 /// Request sent to `POST /api/v1/tracks/check-hashes` to avoid redundant uploads.

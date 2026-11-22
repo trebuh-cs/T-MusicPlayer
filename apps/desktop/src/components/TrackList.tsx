@@ -1,8 +1,10 @@
-import { memo, useState } from "react";
+import { memo, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   ArrowDown,
   ArrowUp,
   Download,
+  FolderOpen,
   FolderPlus,
   Heart,
   ListPlus,
@@ -11,12 +13,30 @@ import {
   Pencil,
   Play,
   Shuffle,
+  SlidersHorizontal,
   Trash2,
   Upload,
 } from "lucide-react";
 import { formatDurationMs } from "../hooks/useAudioEngine";
 import { getCoverUrl } from "../services/api";
 import type { Playlist, Track } from "../types";
+
+interface TrackMenuState {
+  track: Track;
+  idx: number;
+  x: number;
+  y: number;
+  openUpward: boolean;
+}
+
+function hasCustomEdit(track: Track): boolean {
+  return (
+    Math.abs((track.edit_speed ?? 1.0) - 1.0) > 0.01 ||
+    Math.abs(track.edit_gain_db ?? 0.0) > 0.05 ||
+    (track.trim_start_ms ?? 0) > 0 ||
+    track.trim_end_ms !== null
+  );
+}
 
 interface TrackListProps {
   title: string;
@@ -33,6 +53,9 @@ interface TrackListProps {
   onEnqueue: (track: Track) => void;
   onToggleFavorite: (trackId: string) => void;
   onAddTracksToPlaylist: (playlistId: string, trackIds: string[]) => void;
+  onEditTrack: (track: Track) => void;
+  onDownloadAsMp3: (track: Track) => void;
+  onRevealTrack: (track: Track) => void;
   onRemoveFromPlaylist?: (trackId: string) => void;
   onReorderPlaylist?: (orderedIds: string[]) => void;
   onRenamePlaylist?: (newName: string) => void;
@@ -57,6 +80,9 @@ export const TrackList = memo(function TrackList({
   onEnqueue,
   onToggleFavorite,
   onAddTracksToPlaylist,
+  onEditTrack,
+  onDownloadAsMp3,
+  onRevealTrack,
   onRemoveFromPlaylist,
   onReorderPlaylist,
   onRenamePlaylist,
@@ -65,10 +91,46 @@ export const TrackList = memo(function TrackList({
   onAddFolder,
   onOpenWmpImport,
 }: TrackListProps) {
-  const [menuTrackId, setMenuTrackId] = useState<string | null>(null);
+  const [menuState, setMenuState] = useState<TrackMenuState | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(playlist?.name ?? "");
   const [dragIndex, setDragIndex] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!menuState) return;
+    const close = () => setMenuState(null);
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("resize", close);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [menuState]);
+
+  const openTrackMenu = (
+    e: React.MouseEvent<HTMLButtonElement>,
+    track: Track,
+    idx: number
+  ) => {
+    e.stopPropagation();
+    if (menuState?.track.id === track.id) {
+      setMenuState(null);
+      return;
+    }
+    const rect = e.currentTarget.getBoundingClientRect();
+    const menuWidth = 224;
+    const estimatedHeight = 320;
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const openUpward = spaceBelow < estimatedHeight && rect.top > spaceBelow;
+    const x = Math.max(12, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 12));
+    const y = openUpward ? Math.max(12, rect.top - 6) : Math.min(window.innerHeight - 12, rect.bottom + 6);
+    setMenuState({ track, idx, x, y, openUpward });
+  };
 
   const totalMs = tracks.reduce((sum, t) => sum + t.duration_ms, 0);
   const totalMins = Math.floor(totalMs / 60000);
@@ -98,8 +160,11 @@ export const TrackList = memo(function TrackList({
   return (
     <div
       className="flex-1 overflow-y-auto px-6 py-5"
+      onScroll={() => {
+        if (menuState) setMenuState(null);
+      }}
       onClick={() => {
-        if (menuTrackId) setMenuTrackId(null);
+        if (menuState) setMenuState(null);
       }}
     >
       {/* Header Banner */}
@@ -295,7 +360,7 @@ export const TrackList = memo(function TrackList({
             {tracks.map((track, idx) => {
               const isActive = track.id === activeTrackId;
               const coverUrl = getCoverUrl(track.cover_hash);
-              const isMenuOpen = menuTrackId === track.id;
+              const edited = hasCustomEdit(track);
 
               return (
                 <div
@@ -349,12 +414,22 @@ export const TrackList = memo(function TrackList({
                       </div>
                     )}
                     <div className="min-w-0">
-                      <div
-                        className={`text-sm font-medium truncate ${
-                          isActive ? "text-[var(--accent)]" : "text-[var(--text-primary)]"
-                        }`}
-                      >
-                        {track.title}
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <div
+                          className={`text-sm font-medium truncate ${
+                            isActive ? "text-[var(--accent)]" : "text-[var(--text-primary)]"
+                          }`}
+                        >
+                          {track.title}
+                        </div>
+                        {edited && (
+                          <span
+                            title="Custom non-destructive playback defaults applied"
+                            className="shrink-0 text-[9px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-[var(--accent-soft)] text-[var(--accent)]"
+                          >
+                            Edited
+                          </span>
+                        )}
                       </div>
                       <div className="text-xs text-[var(--text-secondary)] truncate">
                         {track.artist}
@@ -400,106 +475,14 @@ export const TrackList = memo(function TrackList({
                       />
                     </button>
 
-                    <div className="relative">
-                      <button
-                        type="button"
-                        onClick={() => setMenuTrackId(isMenuOpen ? null : track.id)}
-                        title="Track options"
-                        className="p-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)] cursor-pointer"
-                      >
-                        <MoreHorizontal className="w-4 h-4" />
-                      </button>
-
-                      {isMenuOpen && (
-                        <div className="absolute right-0 top-8 z-30 w-52 py-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] shadow-2xl text-xs">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              onPlayNext(track);
-                              setMenuTrackId(null);
-                            }}
-                            className="w-full px-3 py-1.5 text-left hover:bg-[var(--bg-hover)] text-[var(--text-primary)] cursor-pointer"
-                          >
-                            Play Next
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              onEnqueue(track);
-                              setMenuTrackId(null);
-                            }}
-                            className="w-full px-3 py-1.5 text-left hover:bg-[var(--bg-hover)] text-[var(--text-primary)] cursor-pointer"
-                          >
-                            Add to Queue
-                          </button>
-
-                          {allPlaylists.length > 0 && (
-                            <div className="my-1 border-t border-[var(--border-subtle)] pt-1">
-                              <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)] flex items-center gap-1.5">
-                                <ListPlus className="w-3 h-3" />
-                                Add to Playlist
-                              </div>
-                              <div className="max-h-32 overflow-y-auto">
-                                {allPlaylists.map((pl) => (
-                                  <button
-                                    key={pl.id}
-                                    type="button"
-                                    onClick={() => {
-                                      onAddTracksToPlaylist(pl.id, [track.id]);
-                                      setMenuTrackId(null);
-                                    }}
-                                    className="w-full px-3 py-1.5 text-left truncate hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
-                                  >
-                                    {pl.name}
-                                  </button>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-
-                          {playlist && (
-                            <div className="my-1 border-t border-[var(--border-subtle)] pt-1">
-                              {onReorderPlaylist && idx > 0 && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    moveTrack(idx, -1);
-                                    setMenuTrackId(null);
-                                  }}
-                                  className="w-full px-3 py-1.5 text-left flex items-center gap-2 hover:bg-[var(--bg-hover)] text-[var(--text-primary)] cursor-pointer"
-                                >
-                                  <ArrowUp className="w-3.5 h-3.5" /> Move Up
-                                </button>
-                              )}
-                              {onReorderPlaylist && idx < tracks.length - 1 && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    moveTrack(idx, 1);
-                                    setMenuTrackId(null);
-                                  }}
-                                  className="w-full px-3 py-1.5 text-left flex items-center gap-2 hover:bg-[var(--bg-hover)] text-[var(--text-primary)] cursor-pointer"
-                                >
-                                  <ArrowDown className="w-3.5 h-3.5" /> Move Down
-                                </button>
-                              )}
-                              {onRemoveFromPlaylist && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    onRemoveFromPlaylist(track.id);
-                                    setMenuTrackId(null);
-                                  }}
-                                  className="w-full px-3 py-1.5 text-left flex items-center gap-2 hover:bg-rose-500/20 text-rose-400 cursor-pointer"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" /> Remove from Playlist
-                                </button>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
+                    <button
+                      type="button"
+                      onClick={(e) => openTrackMenu(e, track, idx)}
+                      title="Track options"
+                      className="p-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)] cursor-pointer"
+                    >
+                      <MoreHorizontal className="w-4 h-4" />
+                    </button>
                   </div>
                 </div>
               );
@@ -507,6 +490,148 @@ export const TrackList = memo(function TrackList({
           </div>
         </div>
       )}
+
+      {/* Viewport-aware Portal Track Menu (never clipped by row content-visibility) */}
+      {menuState &&
+        createPortal(
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              position: "fixed",
+              left: menuState.x,
+              ...(menuState.openUpward
+                ? { bottom: window.innerHeight - menuState.y }
+                : { top: menuState.y }),
+              width: 224,
+            }}
+            className="z-50 py-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-xs"
+          >
+            <button
+              type="button"
+              onClick={() => {
+                onPlayNext(menuState.track);
+                setMenuState(null);
+              }}
+              className="w-full px-3 py-1.5 text-left hover:bg-[var(--bg-hover)] text-[var(--text-primary)] cursor-pointer"
+            >
+              Play Next
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                onEnqueue(menuState.track);
+                setMenuState(null);
+              }}
+              className="w-full px-3 py-1.5 text-left hover:bg-[var(--bg-hover)] text-[var(--text-primary)] cursor-pointer"
+            >
+              Add to Queue
+            </button>
+
+            <div className="my-1 border-t border-[var(--border-subtle)] pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  onEditTrack(menuState.track);
+                  setMenuState(null);
+                }}
+                className="w-full px-3 py-1.5 text-left flex items-center gap-2 hover:bg-[var(--bg-hover)] text-[var(--text-primary)] cursor-pointer"
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5 text-[var(--accent)]" />
+                Edit Track Defaults…
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onDownloadAsMp3(menuState.track);
+                  setMenuState(null);
+                }}
+                className="w-full px-3 py-1.5 text-left flex items-center gap-2 hover:bg-[var(--bg-hover)] text-[var(--text-primary)] cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5 text-[var(--accent)]" />
+                Download as MP3…
+              </button>
+              {!menuState.track.file_path.startsWith("remote://") && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onRevealTrack(menuState.track);
+                    setMenuState(null);
+                  }}
+                  className="w-full px-3 py-1.5 text-left flex items-center gap-2 hover:bg-[var(--bg-hover)] text-[var(--text-primary)] cursor-pointer"
+                >
+                  <FolderOpen className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
+                  Show File Location
+                </button>
+              )}
+            </div>
+
+            {allPlaylists.length > 0 && (
+              <div className="my-1 border-t border-[var(--border-subtle)] pt-1">
+                <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)] flex items-center gap-1.5">
+                  <ListPlus className="w-3 h-3" />
+                  Add to Playlist
+                </div>
+                <div className="max-h-32 overflow-y-auto">
+                  {allPlaylists.map((pl) => (
+                    <button
+                      key={pl.id}
+                      type="button"
+                      onClick={() => {
+                        onAddTracksToPlaylist(pl.id, [menuState.track.id]);
+                        setMenuState(null);
+                      }}
+                      className="w-full px-3 py-1.5 text-left truncate hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+                    >
+                      {pl.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {playlist && (
+              <div className="my-1 border-t border-[var(--border-subtle)] pt-1">
+                {onReorderPlaylist && menuState.idx > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      moveTrack(menuState.idx, -1);
+                      setMenuState(null);
+                    }}
+                    className="w-full px-3 py-1.5 text-left flex items-center gap-2 hover:bg-[var(--bg-hover)] text-[var(--text-primary)] cursor-pointer"
+                  >
+                    <ArrowUp className="w-3.5 h-3.5" /> Move Up
+                  </button>
+                )}
+                {onReorderPlaylist && menuState.idx < tracks.length - 1 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      moveTrack(menuState.idx, 1);
+                      setMenuState(null);
+                    }}
+                    className="w-full px-3 py-1.5 text-left flex items-center gap-2 hover:bg-[var(--bg-hover)] text-[var(--text-primary)] cursor-pointer"
+                  >
+                    <ArrowDown className="w-3.5 h-3.5" /> Move Down
+                  </button>
+                )}
+                {onRemoveFromPlaylist && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onRemoveFromPlaylist(menuState.track.id);
+                      setMenuState(null);
+                    }}
+                    className="w-full px-3 py-1.5 text-left flex items-center gap-2 hover:bg-rose-500/20 text-rose-400 cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" /> Remove from Playlist
+                  </button>
+                )}
+              </div>
+            )}
+          </div>,
+          document.body
+        )}
     </div>
   );
 });

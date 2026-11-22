@@ -360,6 +360,78 @@ pub async fn upload_app_download(
     sync::upload_app_download(&db, &platform, &file_path).await
 }
 
+#[tauri::command]
+pub fn save_track_edit(
+    db: State<'_, Database>,
+    track_id: String,
+    speed: f32,
+    gain_db: f32,
+    trim_start_ms: u64,
+    trim_end_ms: Option<u64>,
+) -> Result<Track, String> {
+    db.save_track_edit(&track_id, speed, gain_db, trim_start_ms, trim_end_ms)
+}
+
+#[tauri::command]
+pub fn reset_track_edit(db: State<'_, Database>, track_id: String) -> Result<Track, String> {
+    db.reset_track_edit(&track_id)
+}
+
+#[tauri::command]
+pub fn reveal_track_in_explorer(db: State<'_, Database>, track_id: String) -> Result<(), String> {
+    let Some(file_path) = db.get_track_file_path(&track_id)? else {
+        return Err("Track not found".to_string());
+    };
+    if file_path.starts_with("remote://") {
+        return Err("This track is streamed from your home server and has no local file path.".to_string());
+    }
+    let path = Path::new(&file_path);
+    if !path.exists() {
+        return Err(format!("File no longer exists on disk: {file_path}"));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", file_path))
+            .spawn()
+            .map_err(|e| format!("Failed to open Explorer: {e}"))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .args(["-R", &file_path])
+            .spawn()
+            .map_err(|e| format!("Failed to open Finder: {e}"))?;
+        Ok(())
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let dir = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_string_lossy()
+            .into_owned();
+        std::process::Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open file manager: {e}"))?;
+        Ok(())
+    }
+}
+
+#[tauri::command]
+pub async fn export_track_as_mp3(
+    db: State<'_, Database>,
+    track_id: String,
+    dest_path: String,
+) -> Result<String, String> {
+    sync::export_track_as_mp3(&db, &track_id, &dest_path).await
+}
+
 fn scan_single_folder(
     db: &Database,
     folder_id: &str,

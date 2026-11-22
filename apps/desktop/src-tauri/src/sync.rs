@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use t_music_core::models::{
     AuthResponse, CheckHashesRequest, CheckHashesResponse, ServerHealth, ServerTrack,
     SyncFavoritePayload, SyncPlaylistPayload, SyncPullResponse, SyncPushRequest,
-    SyncPushResponse,
+    SyncPushResponse, SyncTrackEditPayload,
 };
 use t_music_core::scanner::compute_file_hash;
 use tauri::{AppHandle, Emitter};
@@ -667,14 +667,14 @@ async fn sync_library_inner(app: &AppHandle, db: &Database) -> Result<SyncSummar
         })
         .collect();
 
-    let push_favorites: Vec<SyncFavoritePayload> = db
-        .list_tracks_for_sync()?
-        .into_iter()
+    let sync_rows = db.list_tracks_for_sync()?;
+    let push_favorites: Vec<SyncFavoritePayload> = sync_rows
+        .iter()
         .filter_map(|t| {
-            t.server_track_id.and_then(|sid| {
+            t.server_track_id.as_ref().and_then(|sid| {
                 if t.favorite_updated_at > 0 || t.is_favorite {
                     Some(SyncFavoritePayload {
-                        track_id: sid,
+                        track_id: sid.clone(),
                         is_favorite: t.is_favorite,
                         updated_at: if t.favorite_updated_at > 0 {
                             t.favorite_updated_at
@@ -689,12 +689,33 @@ async fn sync_library_inner(app: &AppHandle, db: &Database) -> Result<SyncSummar
         })
         .collect();
 
+    let push_track_edits: Vec<SyncTrackEditPayload> = sync_rows
+        .iter()
+        .filter_map(|t| {
+            t.server_track_id.as_ref().and_then(|sid| {
+                if t.edit_updated_at > 0 {
+                    Some(SyncTrackEditPayload {
+                        track_id: sid.clone(),
+                        speed: t.edit_speed,
+                        gain_db: t.edit_gain_db,
+                        trim_start_ms: t.trim_start_ms,
+                        trim_end_ms: t.trim_end_ms,
+                        updated_at: t.edit_updated_at,
+                    })
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+
     let push_resp = client
         .post(format!("{base}/api/v1/sync/push"))
         .bearer_auth(&token)
         .json(&SyncPushRequest {
             playlists: push_playlists,
             favorites: push_favorites,
+            track_edits: push_track_edits,
         })
         .send()
         .await
@@ -802,6 +823,10 @@ async fn sync_library_inner(app: &AppHandle, db: &Database) -> Result<SyncSummar
         }
     }
 
+    for edit in &pulled.track_edits {
+        let _ = db.apply_remote_track_edit_sync(edit)?;
+    }
+
     db.save_setting("last_sync_at", &pulled.server_time.to_string())?;
 
     emit_progress(
@@ -878,6 +903,111 @@ pub async fn upload_app_download(
         "Published {} ({:.1} MB) to {}/downloads",
         parsed.filename, mb, base
     ))
+}
+
+/// Exports a local or remote track as an `.mp3` file to `dest_path` without altering the source file.
+pub async fn export_track_as_mp3(
+    db: &Database,
+    track_id: &str,
+    dest_path: &str,
+) -> Result<String, String> {
+    let Some((file_path, format, server_track_id, is_remote)) =
+        db.get_track_export_info(track_id)?
+    else {
+        return Err("Track not found".to_string());
+    };
+
+    let dest = Path::new(dest_path).to_path_buf();
+    if let Some(parent) = dest.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let is_local_file = !is_remote && !file_path.starts_with("remote://") && Path::new(&file_path).is_file();
+
+    if is_local_file && format.eq_ignore_ascii_case("mp3") {
+        let src = Path::new(&file_path).to_path_buf();
+        let dst = dest.clone();
+        tauri::async_runtime::spawn_blocking(move || std::fs::copy(&src, &dst))
+            .await
+            .map_err(|e| format!("Copy task failed: {e}"))?
+            .map_err(|e| format!("Failed copying MP3: {e}"))?;
+        return Ok(dest_path.to_string());
+    }
+
+    if is_local_file {
+        // Non-MP3 local audio: try local FFmpeg first (fast, works offline).
+        let src_str = file_path.clone();
+        let dst_str = dest_path.to_string();
+        let local_ffmpeg = tauri::async_runtime::spawn_blocking(move || {
+            std::process::Command::new("ffmpeg")
+                .args([
+                    "-y",
+                    "-v",
+                    "error",
+                    "-i",
+                    &src_str,
+                    "-vn",
+                    "-c:a",
+                    "libmp3lame",
+                    "-q:a",
+                    "0",
+                    &dst_str,
+                ])
+                .output()
+        })
+        .await
+        .map_err(|e| format!("FFmpeg task failed: {e}"))?;
+
+        if let Ok(output) = local_ffmpeg {
+            if output.status.success() && Path::new(dest_path).is_file() {
+                return Ok(dest_path.to_string());
+            }
+        }
+    }
+
+    // Fallback (or remote track): download / transcode as MP3 from the home server (Docker includes FFmpeg).
+    let srv_id = server_track_id
+        .or_else(|| file_path.strip_prefix("remote://").map(str::to_string))
+        .ok_or_else(|| {
+            "Local FFmpeg is not installed and this track is not synced to your home server yet. Install FFmpeg or sync the track to your server to convert non-MP3 files.".to_string()
+        })?;
+
+    let server_url = db
+        .get_setting("server_url")?
+        .ok_or_else(|| "Not connected to a home server for MP3 conversion/download.".to_string())?;
+    let token = db
+        .get_setting("server_token")?
+        .ok_or_else(|| "Not signed in to a home server.".to_string())?;
+    let base = normalize_base_url(&server_url)?;
+
+    let client = build_upload_client()?;
+    let resp = client
+        .get(format!(
+            "{base}/api/v1/stream/{srv_id}?format=mp3&download=1"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .map_err(|e| format!("Failed downloading MP3 from server: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Server MP3 export failed ({status}): {body}"));
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed reading MP3 response: {e}"))?;
+    let dst = dest.clone();
+    let vec = bytes.to_vec();
+    tauri::async_runtime::spawn_blocking(move || std::fs::write(&dst, &vec))
+        .await
+        .map_err(|e| format!("Write task failed: {e}"))?
+        .map_err(|e| format!("Failed writing MP3 file: {e}"))?;
+
+    Ok(dest_path.to_string())
 }
 
 fn save_session_settings(

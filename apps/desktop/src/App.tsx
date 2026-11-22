@@ -10,6 +10,7 @@ import { ServerSyncView } from "./components/ServerSyncView";
 import { Sidebar } from "./components/Sidebar";
 import { ThemeDrawer } from "./components/ThemeDrawer";
 import { TopBar } from "./components/TopBar";
+import { TrackEditorModal } from "./components/TrackEditorModal";
 import { TrackList } from "./components/TrackList";
 import { WmpImportModal } from "./components/WmpImportModal";
 import { useAudioEngine } from "./hooks/useAudioEngine";
@@ -32,6 +33,7 @@ import {
   type SyncProgressEvent,
   type SyncSummary,
   type Track,
+  type TrackEditDraft,
   type VisualizerStyle,
 } from "./types";
 
@@ -68,6 +70,7 @@ export function App() {
   const [showCinematicSettings, setShowCinematicSettings] = useState(false);
   const [showWmpModal, setShowWmpModal] = useState(false);
   const [showThemeDrawer, setShowThemeDrawer] = useState(false);
+  const [editingTrack, setEditingTrack] = useState<Track | null>(null);
   const [bannerMsg, setBannerMsg] = useState<string | null>(null);
 
   const [serverUrl, setServerUrl] = useState("");
@@ -567,6 +570,64 @@ export function App() {
     setBannerMsg(`Exported "${playlist.name}" to ${dest}`);
   };
 
+  const handleSaveTrackEdit = useCallback(
+    async (trackId: string, draft: TrackEditDraft) => {
+      const updated = await api.saveTrackEdit(
+        trackId,
+        draft.speed,
+        draft.gain_db,
+        draft.trim_start_ms,
+        draft.trim_end_ms
+      );
+      setTracks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+      setPlaylistTracks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+      engine.updateTrackInPlayback(updated);
+      setBannerMsg(
+        `Saved playback defaults for "${updated.title}". Hit Sync to update your phone.`
+      );
+    },
+    [engine]
+  );
+
+  const handleResetTrackEdit = useCallback(
+    async (trackId: string) => {
+      const updated = await api.resetTrackEdit(trackId);
+      setTracks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+      setPlaylistTracks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+      engine.updateTrackInPlayback(updated);
+      setEditingTrack(updated);
+      setBannerMsg(`Reset "${updated.title}" back to original defaults.`);
+    },
+    [engine]
+  );
+
+  const handleDownloadAsMp3 = useCallback(async (track: Track) => {
+    const safeName = `${track.artist} - ${track.title}`
+      .replace(/[<>:"/\\|?*]+/g, "_")
+      .trim();
+    const dest = await save({
+      title: "Download as MP3",
+      defaultPath: `${safeName || "track"}.mp3`,
+      filters: [{ name: "MP3 Audio", extensions: ["mp3"] }],
+    });
+    if (!dest) return;
+    setBannerMsg(`Exporting "${track.title}" as MP3…`);
+    try {
+      const savedPath = await api.exportTrackAsMp3(track.id, dest);
+      setBannerMsg(`Saved MP3 to ${savedPath}`);
+    } catch (err) {
+      setBannerMsg(String(err));
+    }
+  }, []);
+
+  const handleRevealTrack = useCallback(async (track: Track) => {
+    try {
+      await api.revealTrackInExplorer(track.id);
+    } catch (err) {
+      setBannerMsg(String(err));
+    }
+  }, []);
+
   const favoriteTracks = useMemo(
     () => tracks.filter((t) => t.is_favorite),
     [tracks]
@@ -724,6 +785,9 @@ export function App() {
                   .addTracksToPlaylist(playlistId, trackIds)
                   .then(() => refreshLibrary());
               }}
+              onEditTrack={(track) => setEditingTrack(track)}
+              onDownloadAsMp3={(track) => void handleDownloadAsMp3(track)}
+              onRevealTrack={(track) => void handleRevealTrack(track)}
               onRemoveFromPlaylist={
                 activeView.kind === "playlist"
                   ? (trackId) => {
@@ -817,6 +881,16 @@ export function App() {
             void refreshLibrary();
             setActiveView({ kind: "playlist", playlistId: report.playlist.id });
           }}
+        />
+      )}
+
+      {editingTrack && (
+        <TrackEditorModal
+          track={editingTrack}
+          engine={engine}
+          onSave={handleSaveTrackEdit}
+          onReset={handleResetTrackEdit}
+          onClose={() => setEditingTrack(null)}
         />
       )}
 

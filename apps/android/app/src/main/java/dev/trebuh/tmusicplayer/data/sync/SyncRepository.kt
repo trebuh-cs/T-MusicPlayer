@@ -6,6 +6,7 @@ import dev.trebuh.tmusicplayer.data.api.ServerHealthResponse
 import dev.trebuh.tmusicplayer.data.api.SyncFavoriteDto
 import dev.trebuh.tmusicplayer.data.api.SyncPlaylistDto
 import dev.trebuh.tmusicplayer.data.api.SyncPushRequestDto
+import dev.trebuh.tmusicplayer.data.api.SyncTrackEditDto
 import dev.trebuh.tmusicplayer.data.api.TMusicApiClient
 import dev.trebuh.tmusicplayer.data.db.MusicDao
 import dev.trebuh.tmusicplayer.data.db.PlaylistEntity
@@ -177,15 +178,29 @@ class SyncRepository(
                     )
                 }
 
+            val editsToPush = localTracks
+                .filter { it.editUpdatedAt > 0L }
+                .map { tr ->
+                    SyncTrackEditDto(
+                        trackId = tr.id,
+                        speed = tr.editSpeed,
+                        gainDb = tr.editGainDb,
+                        trimStartMs = tr.trimStartMs,
+                        trimEndMs = tr.trimEndMs,
+                        updatedAt = tr.editUpdatedAt,
+                    )
+                }
+
             var pushedPlaylists = 0
             var pushedFavorites = 0
-            if (ownedPlaylistsToPush.isNotEmpty() || favoritesToPush.isNotEmpty()) {
+            if (ownedPlaylistsToPush.isNotEmpty() || favoritesToPush.isNotEmpty() || editsToPush.isNotEmpty()) {
                 val pushRes = api.pushSync(
                     current.serverUrl,
                     current.authToken,
                     SyncPushRequestDto(
                         playlists = ownedPlaylistsToPush,
                         favorites = favoritesToPush,
+                        trackEdits = editsToPush,
                     ),
                 ).getOrElse { err ->
                     _syncMessage.value = "Sync failed: ${err.message}"
@@ -201,6 +216,7 @@ class SyncRepository(
             }
 
             val remoteFavByTrackId = pull.favorites.associateBy { it.trackId }
+            val remoteEditByTrackId = pull.trackEdits.associateBy { it.trackId }
             val pulledTrackIds = pull.tracks.map { it.id }.toSet()
 
             // Remove offline audio for tracks that no longer exist on the server.
@@ -235,6 +251,34 @@ class SyncRepository(
                     else -> false to 0L
                 }
 
+                val remoteEdit = remoteEditByTrackId[dto.id]
+                val useLocalEdit = existing != null && (remoteEdit == null || existing.editUpdatedAt > remoteEdit.updatedAt)
+                val resolvedSpeed = when {
+                    useLocalEdit -> existing!!.editSpeed
+                    remoteEdit != null -> remoteEdit.speed.coerceIn(0.5f, 2.0f)
+                    else -> 1.0f
+                }
+                val resolvedGainDb = when {
+                    useLocalEdit -> existing!!.editGainDb
+                    remoteEdit != null -> remoteEdit.gainDb.coerceIn(-18f, 12f)
+                    else -> 0.0f
+                }
+                val resolvedTrimStart = when {
+                    useLocalEdit -> existing!!.trimStartMs
+                    remoteEdit != null -> remoteEdit.trimStartMs.coerceAtLeast(0L)
+                    else -> 0L
+                }
+                val resolvedTrimEnd = when {
+                    useLocalEdit -> existing!!.trimEndMs
+                    remoteEdit != null -> remoteEdit.trimEndMs
+                    else -> null
+                }
+                val resolvedEditTs = when {
+                    useLocalEdit -> existing!!.editUpdatedAt
+                    remoteEdit != null -> remoteEdit.updatedAt
+                    else -> 0L
+                }
+
                 TrackEntity(
                     id = dto.id,
                     contentHash = dto.contentHash,
@@ -255,6 +299,11 @@ class SyncRepository(
                     createdAt = dto.createdAt,
                     isFavorite = resolvedFav,
                     favoriteUpdatedAt = resolvedFavTs,
+                    editSpeed = resolvedSpeed,
+                    editGainDb = resolvedGainDb,
+                    trimStartMs = resolvedTrimStart,
+                    trimEndMs = resolvedTrimEnd,
+                    editUpdatedAt = resolvedEditTs,
                     localAudioPath = validLocalAudio,
                     localCoverPath = coverCandidate,
                 )

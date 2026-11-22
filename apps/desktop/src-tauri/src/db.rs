@@ -8,7 +8,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use t_music_core::models::{
     MusicFolder, Playlist, RadioStation, ScannedTrack, ServerTrack, SyncFavoritePayload,
-    SyncPlaylistPayload, Track,
+    SyncPlaylistPayload, SyncTrackEditPayload, Track,
 };
 use t_music_core::scanner::ExtractedCover;
 use uuid::Uuid;
@@ -26,6 +26,11 @@ pub struct LocalTrackSyncRow {
     pub is_remote: bool,
     pub is_favorite: bool,
     pub favorite_updated_at: i64,
+    pub edit_speed: f32,
+    pub edit_gain_db: f32,
+    pub trim_start_ms: u64,
+    pub trim_end_ms: Option<u64>,
+    pub edit_updated_at: i64,
 }
 
 /// Local playlist snapshot mapped to server track IDs for sync push.
@@ -176,6 +181,11 @@ impl Database {
             "ALTER TABLE tracks ADD COLUMN server_track_id TEXT",
             "ALTER TABLE tracks ADD COLUMN is_remote INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE tracks ADD COLUMN favorite_updated_at INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE tracks ADD COLUMN edit_speed REAL NOT NULL DEFAULT 1.0",
+            "ALTER TABLE tracks ADD COLUMN edit_gain_db REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE tracks ADD COLUMN trim_start_ms INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE tracks ADD COLUMN trim_end_ms INTEGER",
+            "ALTER TABLE tracks ADD COLUMN edit_updated_at INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE playlists ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE playlists ADD COLUMN is_shared INTEGER NOT NULL DEFAULT 0",
         ] {
@@ -844,13 +854,14 @@ impl Database {
         Ok(())
     }
 
-    /// Lists all tracks with fields needed for sync hashing/uploads/favorites.
+    /// Lists all tracks with fields needed for sync hashing/uploads/favorites/edits.
     pub fn list_tracks_for_sync(&self) -> Result<Vec<LocalTrackSyncRow>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, file_path, title, artist, album, content_hash,
-                        server_track_id, is_remote, is_favorite, favorite_updated_at
+                        server_track_id, is_remote, is_favorite, favorite_updated_at,
+                        edit_speed, edit_gain_db, trim_start_ms, trim_end_ms, edit_updated_at
                  FROM tracks",
             )
             .map_err(|e| e.to_string())?;
@@ -867,6 +878,11 @@ impl Database {
                 is_remote: row.get::<_, i64>(7)? != 0,
                 is_favorite: row.get::<_, i64>(8)? != 0,
                 favorite_updated_at: row.get(9)?,
+                edit_speed: row.get::<_, f64>(10)? as f32,
+                edit_gain_db: row.get::<_, f64>(11)? as f32,
+                trim_start_ms: row.get::<_, i64>(12)?.max(0) as u64,
+                trim_end_ms: row.get::<_, Option<i64>>(13)?.map(|v| v.max(0) as u64),
+                edit_updated_at: row.get(14)?,
             })
         })
     }
@@ -1135,13 +1151,140 @@ impl Database {
         .map_err(|e| e.to_string())?;
         Ok(true)
     }
+
+    /// Saves non-destructive playback defaults (speed, gain_db, trim_start_ms, trim_end_ms) for a track.
+    pub fn save_track_edit(
+        &self,
+        track_id: &str,
+        speed: f32,
+        gain_db: f32,
+        trim_start_ms: u64,
+        trim_end_ms: Option<u64>,
+    ) -> Result<Track, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let (duration_ms, prev_ts): (i64, i64) = conn
+            .query_row(
+                "SELECT duration_ms, edit_updated_at FROM tracks WHERE id = ?1",
+                params![track_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Track not found".to_string())?;
+
+        let clamped_speed = (speed.clamp(0.5, 2.0) * 100.0).round() / 100.0;
+        let clamped_gain = (gain_db.clamp(-18.0, 12.0) * 10.0).round() / 10.0;
+        let max_dur = duration_ms.max(0) as u64;
+        let clean_start = if max_dur > 500 {
+            trim_start_ms.min(max_dur - 500)
+        } else {
+            trim_start_ms
+        };
+        let clean_end = trim_end_ms.and_then(|end| {
+            let capped = if max_dur > 0 { end.min(max_dur) } else { end };
+            if capped > clean_start + 250 && (max_dur == 0 || capped < max_dur) {
+                Some(capped)
+            } else {
+                None
+            }
+        });
+
+        let now = Utc::now().timestamp();
+        let next_ts = now.max(prev_ts + 1);
+
+        conn.execute(
+            "UPDATE tracks
+             SET edit_speed = ?1, edit_gain_db = ?2, trim_start_ms = ?3, trim_end_ms = ?4, edit_updated_at = ?5
+             WHERE id = ?6",
+            params![
+                clamped_speed as f64,
+                clamped_gain as f64,
+                clean_start as i64,
+                clean_end.map(|v| v as i64),
+                next_ts,
+                track_id,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+
+        conn.query_row(
+            &format!("SELECT {TRACK_SELECT_COLUMNS} FROM tracks t WHERE t.id = ?1"),
+            params![track_id],
+            map_track_row,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// Resets a track's non-destructive playback defaults back to original (1.0x, 0 dB, untrimmed).
+    pub fn reset_track_edit(&self, track_id: &str) -> Result<Track, String> {
+        self.save_track_edit(track_id, 1.0, 0.0, 0, None)
+    }
+
+    /// Applies a per-track playback edit pulled from the home server using last-write-wins.
+    pub fn apply_remote_track_edit_sync(&self, edit: &SyncTrackEditPayload) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let existing: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT id, edit_updated_at FROM tracks WHERE server_track_id = ?1",
+                params![edit.track_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+
+        let Some((local_id, existing_ts)) = existing else {
+            return Ok(false);
+        };
+        if edit.updated_at < existing_ts {
+            return Ok(false);
+        }
+
+        conn.execute(
+            "UPDATE tracks
+             SET edit_speed = ?1, edit_gain_db = ?2, trim_start_ms = ?3, trim_end_ms = ?4, edit_updated_at = ?5
+             WHERE id = ?6",
+            params![
+                edit.speed.clamp(0.5, 2.0) as f64,
+                edit.gain_db.clamp(-18.0, 12.0) as f64,
+                edit.trim_start_ms as i64,
+                edit.trim_end_ms.map(|v| v as i64),
+                edit.updated_at,
+                local_id,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
+    /// Looks up path/format/server info needed to export a track as MP3.
+    pub fn get_track_export_info(
+        &self,
+        track_id: &str,
+    ) -> Result<Option<(String, String, Option<String>, bool)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT file_path, format, server_track_id, is_remote FROM tracks WHERE id = ?1",
+            params![track_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, i64>(3)? != 0,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+    }
 }
 
 const TRACK_SELECT_COLUMNS: &str = "
     t.id, t.file_path, t.title, t.artist, t.album, t.album_artist,
     t.track_number, t.disc_number, t.year, t.genre, t.duration_ms,
     t.format, t.bitrate_kbps, t.file_size, t.modified_at, t.cover_hash,
-    t.play_count, t.is_favorite, t.added_at
+    t.play_count, t.is_favorite, t.added_at,
+    t.edit_speed, t.edit_gain_db, t.trim_start_ms, t.trim_end_ms
 ";
 
 fn map_track_row(row: &Row<'_>) -> rusqlite::Result<Track> {
@@ -1165,6 +1308,10 @@ fn map_track_row(row: &Row<'_>) -> rusqlite::Result<Track> {
         play_count: row.get::<_, i64>(16)? as u64,
         is_favorite: row.get::<_, i64>(17)? != 0,
         added_at: row.get(18)?,
+        edit_speed: row.get::<_, f64>(19)? as f32,
+        edit_gain_db: row.get::<_, f64>(20)? as f32,
+        trim_start_ms: row.get::<_, i64>(21)?.max(0) as u64,
+        trim_end_ms: row.get::<_, Option<i64>>(22)?.map(|v| v.max(0) as u64),
     })
 }
 
@@ -1462,6 +1609,35 @@ mod tests {
         };
         assert!(db.apply_remote_favorite_sync(&fav).unwrap());
         assert!(db.get_library_snapshot().unwrap().tracks[0].is_favorite);
+
+        // Save, reset, and remote-sync non-destructive per-track edits.
+        let local_id = db.get_library_snapshot().unwrap().tracks[0].id.clone();
+        let edited = db
+            .save_track_edit(&local_id, 1.25, 4.5, 3000, Some(180_000))
+            .unwrap();
+        assert!((edited.edit_speed - 1.25).abs() < 0.001);
+        assert!((edited.edit_gain_db - 4.5).abs() < 0.001);
+        assert_eq!(edited.trim_start_ms, 3000);
+        assert_eq!(edited.trim_end_ms, Some(180_000));
+
+        let reset = db.reset_track_edit(&local_id).unwrap();
+        assert!((reset.edit_speed - 1.0).abs() < 0.001);
+        assert!((reset.edit_gain_db - 0.0).abs() < 0.001);
+        assert_eq!(reset.trim_start_ms, 0);
+        assert_eq!(reset.trim_end_ms, None);
+
+        let remote_edit = SyncTrackEditPayload {
+            track_id: "srv-t1".into(),
+            speed: 0.85,
+            gain_db: -3.0,
+            trim_start_ms: 1500,
+            trim_end_ms: Some(150_000),
+            updated_at: Utc::now().timestamp() + 100,
+        };
+        assert!(db.apply_remote_track_edit_sync(&remote_edit).unwrap());
+        let after_sync = db.get_library_snapshot().unwrap().tracks[0].clone();
+        assert!((after_sync.edit_speed - 0.85).abs() < 0.001);
+        assert_eq!(after_sync.trim_start_ms, 1500);
 
         // Pruning remote tracks removes stale server entries without touching local files.
         let removed = db.prune_remote_tracks_not_in(&[]).unwrap();

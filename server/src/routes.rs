@@ -48,6 +48,7 @@ pub struct LoginRequest {
 pub struct StreamQuery {
     pub quality: Option<String>,
     pub download: Option<u8>,
+    pub format: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -665,6 +666,58 @@ async fn stream_track(
         .get(header::RANGE)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
+
+    // Optional MP3 download transcode when requested (`?format=mp3`) for non-MP3 source files.
+    if query
+        .format
+        .as_deref()
+        .is_some_and(|f| f.eq_ignore_ascii_case("mp3"))
+        && !stored.meta.format.eq_ignore_ascii_case("mp3")
+    {
+        let mp3_filename = format!(
+            "{} - {}.mp3",
+            stored.meta.artist.replace('"', ""),
+            stored.meta.title.replace('"', "")
+        );
+        match tokio::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-i",
+                &stored.file_path,
+                "-vn",
+                "-c:a",
+                "libmp3lame",
+                "-q:a",
+                "0",
+                "-f",
+                "mp3",
+                "pipe:1",
+            ])
+            .output()
+            .await
+        {
+            Ok(output) if output.status.success() && !output.stdout.is_empty() => {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "audio/mpeg")
+                    .header(
+                        header::CONTENT_DISPOSITION,
+                        format!("attachment; filename=\"{mp3_filename}\""),
+                    )
+                    .header(header::CONTENT_LENGTH, output.stdout.len().to_string())
+                    .body(Body::from(output.stdout))
+                    .unwrap();
+            }
+            _ => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "FFmpeg MP3 transcode failed on server",
+                )
+                    .into_response();
+            }
+        }
+    }
 
     // Optional mobile data-saver transcode when FFmpeg is installed and no Range/download requested.
     if query.quality.as_deref() == Some("saver")

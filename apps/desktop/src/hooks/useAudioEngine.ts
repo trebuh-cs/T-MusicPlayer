@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, getCoverUrl, getStreamUrl } from "../services/api";
-import type { EqSettings, PlayingItem, RadioStation, RepeatMode, Track } from "../types";
+import type {
+  EqSettings,
+  PlayingItem,
+  RadioStation,
+  RepeatMode,
+  Track,
+  TrackEditDraft,
+} from "../types";
 
 export interface HydrateAudioPrefs {
   volume?: number;
@@ -47,6 +54,8 @@ export interface AudioEngineState {
   cycleRepeat: () => void;
   setEq: (eq: EqSettings) => void;
   hydratePreferences: (prefs: HydrateAudioPrefs) => void;
+  setLiveEditPreview: (trackId: string, edit: TrackEditDraft | null) => void;
+  updateTrackInPlayback: (updated: Track) => void;
   clearError: () => void;
 }
 
@@ -103,11 +112,16 @@ export function useAudioEngine(
   const radioAudioRef = useRef<HTMLAudioElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
+  const trackGainNodeRef = useRef<GainNode | null>(null);
   const eqNodesRef = useRef<{
     bass: BiquadFilterNode;
     mid: BiquadFilterNode;
     treble: BiquadFilterNode;
   } | null>(null);
+
+  const liveEditPreviewRef = useRef<{ trackId: string; edit: TrackEditDraft } | null>(null);
+  const pendingStartSecRef = useRef<number | null>(null);
+  const trimEndTriggeredForRef = useRef<string | null>(null);
 
   // Refs for callbacks inside event listeners without stale closures.
   const queueRef = useRef(queue);
@@ -126,6 +140,46 @@ export function useAudioEngine(
   eqRef.current = eq;
   const resolveTrackUrlRef = useRef(resolveTrackUrl);
   resolveTrackUrlRef.current = resolveTrackUrl;
+
+  const resolveEffectiveTrackEdit = useCallback((track: Track): TrackEditDraft => {
+    const preview = liveEditPreviewRef.current;
+    if (preview && preview.trackId === track.id) {
+      return preview.edit;
+    }
+    return {
+      speed: Number.isFinite(track.edit_speed) && track.edit_speed > 0 ? track.edit_speed : 1.0,
+      gain_db: Number.isFinite(track.edit_gain_db) ? track.edit_gain_db : 0.0,
+      trim_start_ms: track.trim_start_ms ?? 0,
+      trim_end_ms: track.trim_end_ms ?? null,
+    };
+  }, []);
+
+  const applyTrackPlaybackParams = useCallback(
+    (track: Track | null) => {
+      const localEl = localAudioRef.current;
+      const edit = track ? resolveEffectiveTrackEdit(track) : null;
+      const effectiveSpeed = Math.max(
+        0.5,
+        Math.min(2.0, playbackRateRef.current * (edit ? edit.speed : 1.0))
+      );
+      if (localEl) {
+        applyPitchPreservedSpeed(localEl, effectiveSpeed);
+      }
+
+      const gainNode = trackGainNodeRef.current;
+      if (gainNode) {
+        const gainDb = edit ? Math.max(-18, Math.min(12, edit.gain_db)) : 0;
+        const linear = Math.pow(10, gainDb / 20);
+        const ctx = audioCtxRef.current;
+        if (ctx && ctx.state === "running") {
+          gainNode.gain.setTargetAtTime(linear, ctx.currentTime, 0.015);
+        } else {
+          gainNode.gain.value = linear;
+        }
+      }
+    },
+    [resolveEffectiveTrackEdit]
+  );
 
   const ensureLocalGraph = useCallback(() => {
     const audioEl = localAudioRef.current;
@@ -151,6 +205,9 @@ export function useAudioEngine(
       treble.frequency.value = 8000;
       treble.gain.value = eqRef.current.treble;
 
+      const trackGain = ctx.createGain();
+      trackGain.gain.value = 1.0;
+
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 512;
       analyser.smoothingTimeConstant = 0.8;
@@ -158,11 +215,13 @@ export function useAudioEngine(
       source.connect(bass);
       bass.connect(mid);
       mid.connect(treble);
-      treble.connect(analyser);
+      treble.connect(trackGain);
+      trackGain.connect(analyser);
       analyser.connect(ctx.destination);
 
       audioCtxRef.current = ctx;
       analyserRef.current = analyser;
+      trackGainNodeRef.current = trackGain;
       eqNodesRef.current = { bass, mid, treble };
     }
 
@@ -196,20 +255,26 @@ export function useAudioEngine(
       if (!localEl) return;
 
       ensureLocalGraph();
+      const edit = resolveEffectiveTrackEdit(track);
+      const startSec = edit.trim_start_ms > 0 ? edit.trim_start_ms / 1000 : 0;
+      pendingStartSecRef.current = startSec > 0 ? startSec : null;
+      trimEndTriggeredForRef.current = null;
+
       setAudioError(null);
       setIsBuffering(true);
-      updateTimeSnapshot(0, track.duration_ms > 0 ? track.duration_ms / 1000 : 0);
+      updateTimeSnapshot(startSec, track.duration_ms > 0 ? track.duration_ms / 1000 : 0);
       setNowPlaying({ kind: "track", track });
 
       localEl.src = resolveTrackUrlRef.current
         ? resolveTrackUrlRef.current(track)
         : getStreamUrl(track.id);
-      applyPitchPreservedSpeed(localEl, playbackRateRef.current);
+      applyTrackPlaybackParams(track);
       localEl.load();
-      applyPitchPreservedSpeed(localEl, playbackRateRef.current);
+      applyTrackPlaybackParams(track);
       localEl
         .play()
         .then(() => {
+          applyTrackPlaybackParams(track);
           setIsPlaying(true);
           setIsBuffering(false);
           void api.recordPlay(track.id).catch(() => {});
@@ -221,7 +286,14 @@ export function useAudioEngine(
           setAudioError(`Unable to play "${track.title}": ${err?.message ?? "playback error"}`);
         });
     },
-    [ensureLocalGraph, onTrackPlayRecorded, stopRadioAudio, updateTimeSnapshot]
+    [
+      applyTrackPlaybackParams,
+      ensureLocalGraph,
+      onTrackPlayRecorded,
+      resolveEffectiveTrackEdit,
+      stopRadioAudio,
+      updateTimeSnapshot,
+    ]
   );
 
   const playTrack = useCallback(
@@ -280,7 +352,10 @@ export function useAudioEngine(
       if (!manual && repeatRef.current === "one") {
         const localEl = localAudioRef.current;
         if (localEl) {
-          localEl.currentTime = 0;
+          const edit = resolveEffectiveTrackEdit(current.track);
+          const startSec = edit.trim_start_ms > 0 ? edit.trim_start_ms / 1000 : 0;
+          trimEndTriggeredForRef.current = null;
+          localEl.currentTime = startSec;
           void localEl.play();
         }
         return;
@@ -304,17 +379,20 @@ export function useAudioEngine(
         setIsPlaying(false);
       }
     },
-    [startTrackElement]
+    [resolveEffectiveTrackEdit, startTrackElement]
   );
 
   const playPrevious = useCallback(() => {
     const current = nowPlayingRef.current;
     if (!current || current.kind === "radio") return;
 
+    const edit = resolveEffectiveTrackEdit(current.track);
+    const startSec = edit.trim_start_ms > 0 ? edit.trim_start_ms / 1000 : 0;
     const localEl = localAudioRef.current;
-    if (localEl && localEl.currentTime > 3) {
-      localEl.currentTime = 0;
-      updateTimeSnapshot(0);
+    if (localEl && localEl.currentTime > startSec + 3) {
+      trimEndTriggeredForRef.current = null;
+      localEl.currentTime = startSec;
+      updateTimeSnapshot(startSec);
       return;
     }
 
@@ -327,7 +405,7 @@ export function useAudioEngine(
       setQueueIndex(prevIdx);
       startTrackElement(list[prevIdx]);
     }
-  }, [startTrackElement, updateTimeSnapshot]);
+  }, [resolveEffectiveTrackEdit, startTrackElement, updateTimeSnapshot]);
 
   const togglePlayPause = useCallback(() => {
     const current = nowPlayingRef.current;
@@ -337,7 +415,10 @@ export function useAudioEngine(
     if (!activeEl) return;
 
     if (activeEl.paused) {
-      if (current.kind === "track") ensureLocalGraph();
+      if (current.kind === "track") {
+        ensureLocalGraph();
+        applyTrackPlaybackParams(current.track);
+      }
       void activeEl
         .play()
         .then(() => setIsPlaying(true))
@@ -346,13 +427,14 @@ export function useAudioEngine(
       activeEl.pause();
       setIsPlaying(false);
     }
-  }, [ensureLocalGraph]);
+  }, [applyTrackPlaybackParams, ensureLocalGraph]);
 
   const seek = useCallback(
     (seconds: number) => {
       const current = nowPlayingRef.current;
       const localEl = localAudioRef.current;
       if (!current || current.kind !== "track" || !localEl) return;
+      trimEndTriggeredForRef.current = null;
       localEl.currentTime = Math.max(0, seconds);
       updateTimeSnapshot(localEl.currentTime);
     },
@@ -395,14 +477,51 @@ export function useAudioEngine(
 
   const toggleMute = useCallback(() => setIsMuted((m) => !m), []);
 
-  const setPlaybackRate = useCallback((rate: number) => {
-    const rounded = Math.round(Math.max(0.5, Math.min(2.0, rate)) * 100) / 100;
-    playbackRateRef.current = rounded;
-    setPlaybackRateState(rounded);
-    if (localAudioRef.current) {
-      applyPitchPreservedSpeed(localAudioRef.current, rounded);
-    }
-  }, []);
+  const setPlaybackRate = useCallback(
+    (rate: number) => {
+      const rounded = Math.round(Math.max(0.5, Math.min(2.0, rate)) * 100) / 100;
+      playbackRateRef.current = rounded;
+      setPlaybackRateState(rounded);
+      const activeTrack =
+        nowPlayingRef.current?.kind === "track" ? nowPlayingRef.current.track : null;
+      applyTrackPlaybackParams(activeTrack);
+    },
+    [applyTrackPlaybackParams]
+  );
+
+  const setLiveEditPreview = useCallback(
+    (trackId: string, edit: TrackEditDraft | null) => {
+      if (edit) {
+        liveEditPreviewRef.current = { trackId, edit };
+      } else if (liveEditPreviewRef.current?.trackId === trackId) {
+        liveEditPreviewRef.current = null;
+      }
+      const activeTrack =
+        nowPlayingRef.current?.kind === "track" ? nowPlayingRef.current.track : null;
+      if (activeTrack && activeTrack.id === trackId) {
+        trimEndTriggeredForRef.current = null;
+        applyTrackPlaybackParams(activeTrack);
+      }
+    },
+    [applyTrackPlaybackParams]
+  );
+
+  const updateTrackInPlayback = useCallback(
+    (updated: Track) => {
+      setQueue((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+      setNowPlaying((prev) =>
+        prev?.kind === "track" && prev.track.id === updated.id
+          ? { kind: "track", track: updated }
+          : prev
+      );
+      if (nowPlayingRef.current?.kind === "track" && nowPlayingRef.current.track.id === updated.id) {
+        nowPlayingRef.current = { kind: "track", track: updated };
+        trimEndTriggeredForRef.current = null;
+        applyTrackPlaybackParams(updated);
+      }
+    },
+    [applyTrackPlaybackParams]
+  );
 
   const toggleShuffle = useCallback(() => setShuffle((s) => !s), []);
   const cycleRepeat = useCallback(
@@ -420,37 +539,40 @@ export function useAudioEngine(
     }
   }, []);
 
-  const hydratePreferences = useCallback((prefs: HydrateAudioPrefs) => {
-    if (typeof prefs.volume === "number" && Number.isFinite(prefs.volume)) {
-      setVolumeState(Math.max(0, Math.min(1, prefs.volume)));
-    }
-    if (typeof prefs.isMuted === "boolean") {
-      setIsMuted(prefs.isMuted);
-    }
-    if (typeof prefs.playbackRate === "number" && Number.isFinite(prefs.playbackRate)) {
-      const rounded = Math.round(Math.max(0.5, Math.min(2.0, prefs.playbackRate)) * 100) / 100;
-      playbackRateRef.current = rounded;
-      setPlaybackRateState(rounded);
-      if (localAudioRef.current) {
-        applyPitchPreservedSpeed(localAudioRef.current, rounded);
+  const hydratePreferences = useCallback(
+    (prefs: HydrateAudioPrefs) => {
+      if (typeof prefs.volume === "number" && Number.isFinite(prefs.volume)) {
+        setVolumeState(Math.max(0, Math.min(1, prefs.volume)));
       }
-    }
-    if (prefs.eq) {
-      eqRef.current = prefs.eq;
-      setEqState(prefs.eq);
-      if (eqNodesRef.current) {
-        eqNodesRef.current.bass.gain.value = prefs.eq.bass;
-        eqNodesRef.current.mid.gain.value = prefs.eq.mid;
-        eqNodesRef.current.treble.gain.value = prefs.eq.treble;
+      if (typeof prefs.isMuted === "boolean") {
+        setIsMuted(prefs.isMuted);
       }
-    }
-    if (typeof prefs.shuffle === "boolean") {
-      setShuffle(prefs.shuffle);
-    }
-    if (prefs.repeat === "off" || prefs.repeat === "all" || prefs.repeat === "one") {
-      setRepeat(prefs.repeat);
-    }
-  }, []);
+      if (typeof prefs.playbackRate === "number" && Number.isFinite(prefs.playbackRate)) {
+        const rounded = Math.round(Math.max(0.5, Math.min(2.0, prefs.playbackRate)) * 100) / 100;
+        playbackRateRef.current = rounded;
+        setPlaybackRateState(rounded);
+        const activeTrack =
+          nowPlayingRef.current?.kind === "track" ? nowPlayingRef.current.track : null;
+        applyTrackPlaybackParams(activeTrack);
+      }
+      if (prefs.eq) {
+        eqRef.current = prefs.eq;
+        setEqState(prefs.eq);
+        if (eqNodesRef.current) {
+          eqNodesRef.current.bass.gain.value = prefs.eq.bass;
+          eqNodesRef.current.mid.gain.value = prefs.eq.mid;
+          eqNodesRef.current.treble.gain.value = prefs.eq.treble;
+        }
+      }
+      if (typeof prefs.shuffle === "boolean") {
+        setShuffle(prefs.shuffle);
+      }
+      if (prefs.repeat === "off" || prefs.repeat === "all" || prefs.repeat === "one") {
+        setRepeat(prefs.repeat);
+      }
+    },
+    [applyTrackPlaybackParams]
+  );
 
   const clearError = useCallback(() => setAudioError(null), []);
 
@@ -466,7 +588,28 @@ export function useAudioEngine(
     localAudioRef.current = localEl;
     radioAudioRef.current = radioEl;
 
-    const onTimeUpdate = () => updateTimeSnapshot(localEl.currentTime || 0);
+    const checkTrimEnd = () => {
+      const current = nowPlayingRef.current;
+      if (!current || current.kind !== "track" || localEl.paused) return;
+      const edit = resolveEffectiveTrackEdit(current.track);
+      if (edit.trim_end_ms === null || edit.trim_end_ms <= edit.trim_start_ms) return;
+      const endSec = edit.trim_end_ms / 1000;
+      if (localEl.currentTime >= endSec - 0.04) {
+        if (repeatRef.current === "one") {
+          localEl.currentTime = edit.trim_start_ms > 0 ? edit.trim_start_ms / 1000 : 0;
+          return;
+        }
+        if (trimEndTriggeredForRef.current !== current.track.id) {
+          trimEndTriggeredForRef.current = current.track.id;
+          playNext(false);
+        }
+      }
+    };
+
+    const onTimeUpdate = () => {
+      updateTimeSnapshot(localEl.currentTime || 0);
+      checkTrimEnd();
+    };
     const onDurationChange = () => {
       if (Number.isFinite(localEl.duration) && localEl.duration > 0) {
         updateTimeSnapshot(timeSnapshotRef.current.currentTime, localEl.duration);
@@ -475,13 +618,22 @@ export function useAudioEngine(
     const onEnded = () => playNext(false);
     const onLocalWaiting = () => setIsBuffering(true);
     const onLocalLoadedMetadata = () => {
-      applyPitchPreservedSpeed(localEl, playbackRateRef.current);
+      const activeTrack =
+        nowPlayingRef.current?.kind === "track" ? nowPlayingRef.current.track : null;
+      applyTrackPlaybackParams(activeTrack);
+      if (pendingStartSecRef.current !== null && Number.isFinite(localEl.duration)) {
+        const target = Math.min(pendingStartSecRef.current, Math.max(0, localEl.duration - 0.1));
+        localEl.currentTime = target;
+        pendingStartSecRef.current = null;
+      }
       if (Number.isFinite(localEl.duration) && localEl.duration > 0) {
-        updateTimeSnapshot(timeSnapshotRef.current.currentTime, localEl.duration);
+        updateTimeSnapshot(localEl.currentTime || 0, localEl.duration);
       }
     };
     const onLocalPlaying = () => {
-      applyPitchPreservedSpeed(localEl, playbackRateRef.current);
+      const activeTrack =
+        nowPlayingRef.current?.kind === "track" ? nowPlayingRef.current.track : null;
+      applyTrackPlaybackParams(activeTrack);
       setIsBuffering(false);
       setIsPlaying(true);
     };
@@ -516,7 +668,11 @@ export function useAudioEngine(
     radioEl.addEventListener("playing", onRadioPlaying);
     radioEl.addEventListener("error", onRadioError);
 
+    // Lightweight 100ms watcher for accurate end-trim cutoffs while playing.
+    const trimInterval = window.setInterval(checkTrimEnd, 100);
+
     return () => {
+      window.clearInterval(trimInterval);
       localEl.pause();
       radioEl.pause();
       localEl.removeEventListener("timeupdate", onTimeUpdate);
@@ -531,7 +687,7 @@ export function useAudioEngine(
       radioEl.removeEventListener("error", onRadioError);
       void audioCtxRef.current?.close();
     };
-  }, [playNext, updateTimeSnapshot]);
+  }, [applyTrackPlaybackParams, playNext, resolveEffectiveTrackEdit, updateTimeSnapshot]);
 
   // Sync volume & mute to both audio elements.
   useEffect(() => {
@@ -603,6 +759,8 @@ export function useAudioEngine(
       cycleRepeat,
       setEq,
       hydratePreferences,
+      setLiveEditPreview,
+      updateTrackInPlayback,
       clearError,
     }),
     [
@@ -635,6 +793,8 @@ export function useAudioEngine(
       cycleRepeat,
       setEq,
       hydratePreferences,
+      setLiveEditPreview,
+      updateTrackInPlayback,
       clearError,
     ]
   );
