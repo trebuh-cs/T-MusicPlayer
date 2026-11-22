@@ -344,8 +344,20 @@ pub fn server_logout(db: State<'_, Database>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn sync_with_server(db: State<'_, Database>) -> Result<SyncSummary, String> {
-    sync::sync_library(&db).await
+pub async fn sync_with_server(
+    app: tauri::AppHandle,
+    db: State<'_, Database>,
+) -> Result<SyncSummary, String> {
+    sync::sync_library(&app, &db).await
+}
+
+#[tauri::command]
+pub async fn upload_app_download(
+    db: State<'_, Database>,
+    platform: String,
+    file_path: String,
+) -> Result<String, String> {
+    sync::upload_app_download(&db, &platform, &file_path).await
 }
 
 fn scan_single_folder(

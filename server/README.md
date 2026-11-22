@@ -26,3 +26,17 @@ Lightweight, multi-user Rust media & sync server powered by **Axum**, **SQLite**
    http://localhost:8484
    ```
    *(Verify health: `curl http://localhost:8484/api/v1/health`.)*
+
+## Self-Hosted Client Downloads (`/downloads`)
+
+The download portal runs on the **exact same domain and Cloudflare Tunnel** (`/` and `/downloads`)—no second domain is needed.
+
+- **Option A — Upload from Desktop App (Admin):** Sign into the desktop app with your admin account and open **Home Server Sync -> Self-Hosted Download Page** to upload your `.apk` or `.exe` straight to the server.
+- **Option B — Copy directly into `./server-downloads/`:**
+  ```bash
+  # Android APK (served at /downloads/android.apk)
+  cp T-MusicPlayer.apk ./server-downloads/T-MusicPlayer.apk
+  # Optional Windows EXE (served at /downloads/windows.exe)
+  cp t-music-desktop.exe ./server-downloads/T-MusicPlayer.exe
+  ```
+  *(Note: When publishing from the desktop UI over Cloudflare Tunnel, free-tier Cloudflare proxy enforces a ~100 MB per-request cap, while music uploads stream in 8 MB chunks so multi-hour audio files of any size upload cleanly.)*

@@ -12,6 +12,7 @@ pub struct ServerConfig {
     pub port: u16,
     pub data_dir: PathBuf,
     pub music_dir: PathBuf,
+    pub downloads_dir: PathBuf,
     pub jwt_secret: String,
     pub admin_username: Option<String>,
     pub admin_password: Option<String>,
@@ -31,8 +32,12 @@ impl ServerConfig {
 
         let data_dir = PathBuf::from(env::var("DATA_DIR").unwrap_or_else(|_| "./data".into()));
         let music_dir = PathBuf::from(env::var("MUSIC_DIR").unwrap_or_else(|_| "./music".into()));
+        let downloads_dir =
+            PathBuf::from(env::var("DOWNLOADS_DIR").unwrap_or_else(|_| "./downloads".into()));
         fs::create_dir_all(&data_dir).map_err(|e| format!("Failed to create DATA_DIR: {e}"))?;
         fs::create_dir_all(&music_dir).map_err(|e| format!("Failed to create MUSIC_DIR: {e}"))?;
+        fs::create_dir_all(&downloads_dir)
+            .map_err(|e| format!("Failed to create DOWNLOADS_DIR: {e}"))?;
 
         let jwt_secret = match env::var("JWT_SECRET").ok().filter(|s| !s.trim().is_empty()) {
             Some(secret) => secret,
@@ -51,6 +56,7 @@ impl ServerConfig {
             port,
             data_dir,
             music_dir,
+            downloads_dir,
             jwt_secret,
             admin_username,
             admin_password,

@@ -25,13 +25,16 @@ fn temp_test_state(invite_code: Option<&str>) -> (AppState, PathBuf) {
     let root = std::env::temp_dir().join(format!("t_music_server_test_{nanos}"));
     let data_dir = root.join("data");
     let music_dir = root.join("music");
+    let downloads_dir = root.join("downloads");
     fs::create_dir_all(&data_dir).unwrap();
     fs::create_dir_all(&music_dir).unwrap();
+    fs::create_dir_all(&downloads_dir).unwrap();
 
     let cfg = ServerConfig {
         port: 0,
         data_dir,
         music_dir,
+        downloads_dir,
         jwt_secret: "unit_test_secret_0123456789abcdef".to_string(),
         admin_username: None,
         admin_password: None,
@@ -317,6 +320,197 @@ async fn multi_user_auth_upload_dedup_range_stream_and_two_way_sync() {
         .unwrap();
     let tamper_val: Value = serde_json::from_slice(&read_body_bytes(tamper_resp).await).unwrap();
     assert_eq!(tamper_val["applied_playlists"], 0);
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn chunked_upload_and_self_hosted_downloads_portal() {
+    use sha2::{Digest, Sha256};
+
+    let (state, root) = temp_test_state(None);
+    let app = build_router(state);
+
+    // Register admin (first user) and regular friend user.
+    let admin_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/register")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"username":"host","password":"password123"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let admin_auth: AuthResponse = serde_json::from_slice(&read_body_bytes(admin_resp).await).unwrap();
+    assert_eq!(admin_auth.user.role, "admin");
+
+    let friend_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/register")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"username":"friend","password":"password123"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let friend_auth: AuthResponse = serde_json::from_slice(&read_body_bytes(friend_resp).await).unwrap();
+    assert_eq!(friend_auth.user.role, "user");
+
+    // 1. Multi-chunk upload (split across two slices).
+    let part1 = b"ID3chunked-part-one-";
+    let part2 = b"chunked-part-two-end";
+    let mut full = Vec::new();
+    full.extend_from_slice(part1);
+    full.extend_from_slice(part2);
+    let digest = Sha256::digest(&full);
+    let expected_hash: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+
+    let init_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/tracks/upload/init")
+                .header(header::AUTHORIZATION, format!("Bearer {}", admin_auth.token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "content_hash": expected_hash,
+                        "filename": "two_hour_mix.mp3",
+                        "total_size": full.len(),
+                        "title": "Two Hour Set",
+                        "artist": "DJ Test",
+                        "album": "Long Mixes"
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(init_resp.status(), StatusCode::OK);
+    let init_val: Value = serde_json::from_slice(&read_body_bytes(init_resp).await).unwrap();
+    assert_eq!(init_val["status"], "ready");
+    let upload_id = init_val["upload_id"].as_str().unwrap().to_string();
+
+    let chunk1_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/tracks/upload/{upload_id}/chunk?offset=0"))
+                .header(header::AUTHORIZATION, format!("Bearer {}", admin_auth.token))
+                .body(Body::from(part1.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(chunk1_resp.status(), StatusCode::OK);
+
+    let chunk2_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/tracks/upload/{upload_id}/chunk?offset={}",
+                    part1.len()
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {}", admin_auth.token))
+                .body(Body::from(part2.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(chunk2_resp.status(), StatusCode::OK);
+
+    let complete_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/tracks/upload/{upload_id}/complete"))
+                .header(header::AUTHORIZATION, format!("Bearer {}", admin_auth.token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(complete_resp.status(), StatusCode::CREATED);
+    let uploaded_track: ServerTrack =
+        serde_json::from_slice(&read_body_bytes(complete_resp).await).unwrap();
+    assert_eq!(uploaded_track.content_hash, expected_hash);
+    assert_eq!(uploaded_track.title, "Two Hour Set");
+
+    // 2. Self-hosted download portal permissions & serving.
+    let fake_apk = b"PK\x03\x04fake-android-apk-binary";
+    let forbidden_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/admin/downloads/android")
+                .header(header::AUTHORIZATION, format!("Bearer {}", friend_auth.token))
+                .body(Body::from(fake_apk.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forbidden_resp.status(), StatusCode::FORBIDDEN);
+
+    let upload_apk_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/admin/downloads/android")
+                .header(header::AUTHORIZATION, format!("Bearer {}", admin_auth.token))
+                .body(Body::from(fake_apk.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(upload_apk_resp.status(), StatusCode::OK);
+
+    let portal_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/downloads")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(portal_resp.status(), StatusCode::OK);
+    let portal_html = String::from_utf8(read_body_bytes(portal_resp).await).unwrap();
+    assert!(portal_html.contains("/downloads/android.apk"));
+
+    let dl_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/downloads/android.apk")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(dl_resp.status(), StatusCode::OK);
+    assert_eq!(
+        dl_resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/vnd.android.package-archive")
+    );
+    assert_eq!(read_body_bytes(dl_resp).await, fake_apk);
 
     let _ = fs::remove_dir_all(&root);
 }

@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "../services/api";
+import type { SyncProgressEvent } from "../types";
 import {
   Cloud,
   FolderPlus,
@@ -21,6 +22,7 @@ interface TopBarProps {
   onSearchChange: (q: string) => void;
   isScanning: boolean;
   isSyncing: boolean;
+  syncProgress?: SyncProgressEvent | null;
   isServerConnected: boolean;
   isFullscreen: boolean;
   onAddFolder: () => void;
@@ -39,6 +41,7 @@ export const TopBar = memo(function TopBar({
   onSearchChange,
   isScanning,
   isSyncing,
+  syncProgress,
   isServerConnected,
   isFullscreen,
   onAddFolder,
@@ -150,7 +153,11 @@ export const TopBar = memo(function TopBar({
               }`}
             />
             <span className="hidden md:inline">
-              {isSyncing ? "Syncing..." : "Sync"}
+              {isSyncing
+                ? syncProgress
+                  ? `Sync ${syncProgress.percent}%`
+                  : "Syncing..."
+                : "Sync"}
             </span>
           </button>
         )}

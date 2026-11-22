@@ -13,9 +13,11 @@ services:
       - PORT=8484
       - DATA_DIR=/app/data
       - MUSIC_DIR=/app/music
+      - DOWNLOADS_DIR=/app/downloads
     volumes:
       - ./server-data:/app/data
       - ./server-music:/app/music
+      - ./server-downloads:/app/downloads
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8484/api/v1/health"]
       interval: 30s

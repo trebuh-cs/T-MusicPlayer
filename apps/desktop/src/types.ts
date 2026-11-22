@@ -205,3 +205,22 @@ export interface SyncSummary {
   synced_favorites: number;
   server_time: number;
 }
+
+export interface SyncProgressEvent {
+  phase:
+    | "hashing"
+    | "checking"
+    | "uploading"
+    | "pushing"
+    | "pulling"
+    | "covers"
+    | "done"
+    | "error";
+  percent: number;
+  current: number;
+  total: number;
+  file_name: string | null;
+  bytes_sent: number;
+  bytes_total: number;
+  message: string;
+}

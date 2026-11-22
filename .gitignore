@@ -34,3 +34,4 @@ apps/android/local.properties
 # Docker server runtime volumes
 server-data/
 server-music/
+server-downloads/

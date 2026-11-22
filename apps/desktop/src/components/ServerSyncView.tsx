@@ -1,18 +1,23 @@
 import { useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
+  Check,
   CheckCircle2,
   Cloud,
   CloudUpload,
+  Copy,
+  Globe,
   Loader2,
   LogOut,
   RefreshCw,
   Server,
   ShieldCheck,
   Smartphone,
+  Upload,
   UserPlus,
 } from "lucide-react";
 import { api } from "../services/api";
-import type { ServerHealth, SyncSummary } from "../types";
+import type { ServerHealth, SyncProgressEvent, SyncSummary } from "../types";
 
 interface ServerSyncViewProps {
   serverUrl: string;
@@ -21,10 +26,15 @@ interface ServerSyncViewProps {
   serverRole: string;
   lastSyncAt: number | null;
   isSyncing: boolean;
+  syncProgress: SyncProgressEvent | null;
   lastSyncSummary: SyncSummary | null;
   onAuthSuccess: () => Promise<void>;
   onLogout: () => Promise<void>;
   onSyncNow: () => Promise<void>;
+}
+
+function formatMb(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 export function ServerSyncView({
@@ -34,6 +44,7 @@ export function ServerSyncView({
   serverRole,
   lastSyncAt,
   isSyncing,
+  syncProgress,
   lastSyncSummary,
   onAuthSuccess,
   onLogout,
@@ -49,8 +60,51 @@ export function ServerSyncView({
   const [health, setHealth] = useState<ServerHealth | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [copiedPortal, setCopiedPortal] = useState(false);
+  const [publishingPlatform, setPublishingPlatform] = useState<"android" | "windows" | null>(null);
+  const [publishStatus, setPublishStatus] = useState<string | null>(null);
 
   const isConnected = Boolean(serverToken && serverUrl);
+  const cleanBaseUrl = serverUrl.replace(/\/+$/, "");
+  const downloadsPortalUrl = `${cleanBaseUrl}/downloads`;
+
+  const handleCopyPortal = async () => {
+    try {
+      await navigator.clipboard.writeText(downloadsPortalUrl);
+      setCopiedPortal(true);
+      window.setTimeout(() => setCopiedPortal(false), 1800);
+    } catch {
+      // Ignore clipboard failures on locked contexts
+    }
+  };
+
+  const handlePublishArtifact = async (platform: "android" | "windows") => {
+    setError(null);
+    setPublishStatus(null);
+    const selected = await open({
+      multiple: false,
+      title:
+        platform === "android"
+          ? "Select Android APK to publish to /downloads"
+          : "Select Windows EXE to publish to /downloads",
+      filters: [
+        platform === "android"
+          ? { name: "Android Installer", extensions: ["apk"] }
+          : { name: "Windows Executable", extensions: ["exe"] },
+      ],
+    });
+    if (!selected || Array.isArray(selected)) return;
+
+    setPublishingPlatform(platform);
+    try {
+      const msg = await api.uploadAppDownload(platform, selected);
+      setPublishStatus(msg);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setPublishingPlatform(null);
+    }
+  };
 
   const handleTestConnection = async () => {
     setError(null);
@@ -114,72 +168,188 @@ export function ServerSyncView({
         )}
 
         {isConnected ? (
-          <div className="p-5 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] space-y-5">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-[var(--accent-soft)] flex items-center justify-center">
-                  <Cloud className="w-5 h-5 text-[var(--accent)]" />
+          <div className="space-y-4">
+            <div className="p-5 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-[var(--accent-soft)] flex items-center justify-center">
+                    <Cloud className="w-5 h-5 text-[var(--accent)]" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-bold text-[var(--text-primary)]">
+                        {serverUsername}
+                      </span>
+                      <span className="text-[10px] uppercase font-semibold px-2 py-0.5 rounded bg-[var(--bg-surface)] text-[var(--accent)]">
+                        {serverRole || "user"}
+                      </span>
+                    </div>
+                    <div className="text-xs font-mono-num text-[var(--text-secondary)] mt-0.5">
+                      {serverUrl}
+                    </div>
+                  </div>
                 </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-bold text-[var(--text-primary)]">
-                      {serverUsername}
-                    </span>
-                    <span className="text-[10px] uppercase font-semibold px-2 py-0.5 rounded bg-[var(--bg-surface)] text-[var(--accent)]">
-                      {serverRole || "user"}
-                    </span>
-                  </div>
-                  <div className="text-xs font-mono-num text-[var(--text-secondary)] mt-0.5">
-                    {serverUrl}
-                  </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void onSyncNow()}
+                    disabled={isSyncing}
+                    className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold disabled:opacity-50 cursor-pointer"
+                    style={{
+                      background: "var(--accent)",
+                      color: "var(--accent-contrast)",
+                    }}
+                  >
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 ${isSyncing ? "animate-spin" : ""}`}
+                    />
+                    {isSyncing
+                      ? `Syncing ${syncProgress?.percent ?? 0}%`
+                      : "Sync Now"}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => void onLogout()}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] border border-[var(--border-subtle)] text-[var(--text-secondary)] cursor-pointer"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    Sign Out
+                  </button>
                 </div>
               </div>
 
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => void onSyncNow()}
-                  disabled={isSyncing}
-                  className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold disabled:opacity-50 cursor-pointer"
-                  style={{
-                    background: "var(--accent)",
-                    color: "var(--accent-contrast)",
-                  }}
-                >
-                  <RefreshCw
-                    className={`w-3.5 h-3.5 ${isSyncing ? "animate-spin" : ""}`}
-                  />
-                  {isSyncing ? "Syncing..." : "Sync Now"}
-                </button>
+              {(isSyncing ||
+                (syncProgress &&
+                  syncProgress.phase !== "done" &&
+                  syncProgress.phase !== "error")) && (
+                <div className="p-3.5 rounded-xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] space-y-2">
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <span className="font-medium text-[var(--text-primary)] truncate">
+                      {syncProgress?.message || "Syncing library…"}
+                    </span>
+                    <span className="font-mono-num font-bold text-[var(--accent)] shrink-0">
+                      {syncProgress?.percent ?? 0}%
+                    </span>
+                  </div>
+                  <div className="w-full h-2 rounded-full bg-[var(--bg-hover)] overflow-hidden">
+                    <div
+                      className="h-full rounded-full transition-[width] duration-150"
+                      style={{
+                        width: `${Math.min(100, Math.max(2, syncProgress?.percent ?? 0))}%`,
+                        background: "var(--accent)",
+                      }}
+                    />
+                  </div>
+                  {(syncProgress?.file_name || (syncProgress?.bytes_total ?? 0) > 0) && (
+                    <div className="flex items-center justify-between gap-3 text-[11px] text-[var(--text-muted)]">
+                      <span className="truncate">
+                        {syncProgress?.file_name ?? ""}
+                      </span>
+                      {(syncProgress?.bytes_total ?? 0) > 0 && (
+                        <span className="font-mono-num shrink-0">
+                          {formatMb(syncProgress?.bytes_sent ?? 0)} /{" "}
+                          {formatMb(syncProgress?.bytes_total ?? 0)}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
 
-                <button
-                  type="button"
-                  onClick={() => void onLogout()}
-                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] border border-[var(--border-subtle)] text-[var(--text-secondary)] cursor-pointer"
-                >
-                  <LogOut className="w-3.5 h-3.5" />
-                  Sign Out
-                </button>
+              <div className="grid sm:grid-cols-2 gap-3 pt-3 border-t border-[var(--border-subtle)] text-xs">
+                <div className="px-3.5 py-2.5 rounded-xl bg-[var(--bg-surface)]">
+                  <div className="text-[11px] text-[var(--text-muted)]">Last Synced</div>
+                  <div className="font-mono-num text-[var(--text-primary)] mt-0.5">
+                    {lastSyncAt
+                      ? new Date(lastSyncAt * 1000).toLocaleString()
+                      : "Never synced yet — click Sync Now"}
+                  </div>
+                </div>
+                <div className="px-3.5 py-2.5 rounded-xl bg-[var(--bg-surface)]">
+                  <div className="text-[11px] text-[var(--text-muted)]">Latest Result</div>
+                  <div className="font-mono-num text-[var(--text-primary)] mt-0.5">
+                    {lastSyncSummary
+                      ? `+${lastSyncSummary.uploaded_tracks} up · +${lastSyncSummary.pulled_tracks} down · ${lastSyncSummary.synced_playlists} playlists`
+                      : "Ready for two-way sync"}
+                  </div>
+                </div>
               </div>
             </div>
 
-            <div className="grid sm:grid-cols-2 gap-3 pt-3 border-t border-[var(--border-subtle)] text-xs">
-              <div className="px-3.5 py-2.5 rounded-xl bg-[var(--bg-surface)]">
-                <div className="text-[11px] text-[var(--text-muted)]">Last Synced</div>
-                <div className="font-mono-num text-[var(--text-primary)] mt-0.5">
-                  {lastSyncAt
-                    ? new Date(lastSyncAt * 1000).toLocaleString()
-                    : "Never synced yet — click Sync Now"}
-                </div>
+            {/* Self-Hosted Download Page Card */}
+            <div className="p-5 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] space-y-3">
+              <div className="flex items-center gap-2">
+                <Globe className="w-4 h-4 text-[var(--accent)]" />
+                <span className="text-sm font-semibold text-[var(--text-primary)]">
+                  Self-Hosted App Download Page
+                </span>
               </div>
-              <div className="px-3.5 py-2.5 rounded-xl bg-[var(--bg-surface)]">
-                <div className="text-[11px] text-[var(--text-muted)]">Latest Result</div>
-                <div className="font-mono-num text-[var(--text-primary)] mt-0.5">
-                  {lastSyncSummary
-                    ? `+${lastSyncSummary.uploaded_tracks} up · +${lastSyncSummary.pulled_tracks} down · ${lastSyncSummary.synced_playlists} playlists`
-                    : "Ready for two-way sync"}
-                </div>
+              <p className="text-xs text-[var(--text-secondary)]">
+                Share this URL on the exact same domain so friends can download the Pixel/Android APK or Windows app directly from your server:
+              </p>
+
+              <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-[var(--bg-surface)] border border-[var(--border-subtle)]">
+                <code className="flex-1 text-xs font-mono-num text-[var(--accent)] truncate">
+                  {downloadsPortalUrl}
+                </code>
+                <button
+                  type="button"
+                  onClick={() => void handleCopyPortal()}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)] border border-[var(--border-subtle)] text-[var(--text-primary)] cursor-pointer"
+                >
+                  {copiedPortal ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-[var(--accent)]" />
+                      Copied
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      Copy Link
+                    </>
+                  )}
+                </button>
               </div>
+
+              {serverRole === "admin" && (
+                <div className="pt-1 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={publishingPlatform !== null}
+                    onClick={() => void handlePublishArtifact("android")}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] border border-[var(--border-subtle)] text-[var(--text-primary)] disabled:opacity-50 cursor-pointer"
+                  >
+                    {publishingPlatform === "android" ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--accent)]" />
+                    ) : (
+                      <Upload className="w-3.5 h-3.5 text-[var(--accent)]" />
+                    )}
+                    Publish Android APK
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={publishingPlatform !== null}
+                    onClick={() => void handlePublishArtifact("windows")}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] border border-[var(--border-subtle)] text-[var(--text-primary)] disabled:opacity-50 cursor-pointer"
+                  >
+                    {publishingPlatform === "windows" ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--accent)]" />
+                    ) : (
+                      <Upload className="w-3.5 h-3.5 text-[var(--accent)]" />
+                    )}
+                    Publish Windows EXE
+                  </button>
+                </div>
+              )}
+
+              {publishStatus && (
+                <div className="text-xs text-emerald-400 font-medium">
+                  {publishStatus}
+                </div>
+              )}
             </div>
           </div>
         ) : (

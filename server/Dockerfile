@@ -21,10 +21,11 @@ COPY --from=builder /build/target/release/t-music-server /usr/local/bin/t-music-
 ENV PORT=8484
 ENV DATA_DIR=/app/data
 ENV MUSIC_DIR=/app/music
+ENV DOWNLOADS_DIR=/app/downloads
 ENV RUST_LOG=info
 
-RUN mkdir -p /app/data /app/music
-VOLUME ["/app/data", "/app/music"]
+RUN mkdir -p /app/data /app/music /app/downloads
+VOLUME ["/app/data", "/app/music", "/app/downloads"]
 EXPOSE 8484
 
 CMD ["/usr/local/bin/t-music-server"]

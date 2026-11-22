@@ -102,6 +102,8 @@ export const api = {
     }),
   serverLogout: () => invoke<void>("server_logout"),
   syncWithServer: () => invoke<SyncSummary>("sync_with_server"),
+  uploadAppDownload: (platform: "android" | "windows", filePath: string) =>
+    invoke<string>("upload_app_download", { platform, filePath }),
 };
 
 // Legal Internet Radio discovery via public Radio Browser mirrors.

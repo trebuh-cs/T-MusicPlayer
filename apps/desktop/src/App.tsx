@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { AlertCircle, X } from "lucide-react";
 import { CinematicOverlay } from "./components/CinematicOverlay";
@@ -28,6 +29,7 @@ import {
   type Playlist,
   type RadioStation,
   type RepeatMode,
+  type SyncProgressEvent,
   type SyncSummary,
   type Track,
   type VisualizerStyle,
@@ -74,6 +76,7 @@ export function App() {
   const [serverRole, setServerRole] = useState("");
   const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [syncProgress, setSyncProgress] = useState<SyncProgressEvent | null>(null);
   const [lastSyncSummary, setLastSyncSummary] = useState<SyncSummary | null>(null);
 
   const cinematicEnteredFullscreenRef = useRef(false);
@@ -206,6 +209,16 @@ export function App() {
 
   const handleSyncNow = useCallback(async () => {
     setIsSyncing(true);
+    setSyncProgress({
+      phase: "hashing",
+      percent: 0,
+      current: 0,
+      total: 0,
+      file_name: null,
+      bytes_sent: 0,
+      bytes_total: 0,
+      message: "Starting two-way sync…",
+    });
     try {
       const summary = await api.syncWithServer();
       setLastSyncSummary(summary);
@@ -228,6 +241,26 @@ export function App() {
     await refreshLibrary(false);
     setLastSyncSummary(null);
   }, [refreshLibrary]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void listen<SyncProgressEvent>("sync-progress", (event) => {
+      if (!cancelled) {
+        setSyncProgress(event.payload);
+      }
+    }).then((fn) => {
+      if (cancelled) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     void refreshLibrary(true).catch((err) => {
@@ -606,6 +639,7 @@ export function App() {
             onSearchChange={setSearchQuery}
             isScanning={isScanning}
             isSyncing={isSyncing}
+            syncProgress={syncProgress}
             isServerConnected={isServerConnected}
             isFullscreen={isFullscreen}
             onAddFolder={() => void handleAddFolder()}
@@ -654,6 +688,7 @@ export function App() {
               serverRole={serverRole}
               lastSyncAt={lastSyncAt}
               isSyncing={isSyncing}
+              syncProgress={syncProgress}
               lastSyncSummary={lastSyncSummary}
               onAuthSuccess={() => refreshLibrary(false)}
               onLogout={handleServerLogout}
