@@ -1,0 +1,140 @@
+[
+  {
+    "id": "obsidian",
+    "name": "Obsidian Studio",
+    "description": "Deep studio dark with electric indigo and cyan spectrum accents",
+    "mode": "dark",
+    "fontDisplay": "'Inter', 'Segoe UI', system-ui, sans-serif",
+    "fontMono": "'JetBrains Mono', 'Cascadia Mono', Consolas, monospace",
+    "colors": {
+      "bgBase": "#0B0D12",
+      "bgElevated": "#12151E",
+      "bgSurface": "#181C28",
+      "bgHover": "#222838",
+      "borderSubtle": "rgba(255, 255, 255, 0.08)",
+      "textPrimary": "#F4F6FB",
+      "textSecondary": "#A5AEBF",
+      "textMuted": "#6B7489",
+      "accent": "#6366F1",
+      "accentContrast": "#FFFFFF",
+      "accentSoft": "rgba(99, 102, 241, 0.16)",
+      "vizStart": "#6366F1",
+      "vizEnd": "#22D3EE"
+    }
+  },
+  {
+    "id": "tpx",
+    "name": "TPX Matte",
+    "description": "Matte carbon black chassis with electric TPX neon green accents",
+    "mode": "dark",
+    "fontDisplay": "'Inter', 'Segoe UI', system-ui, sans-serif",
+    "fontMono": "'JetBrains Mono', 'Cascadia Mono', Consolas, monospace",
+    "colors": {
+      "bgBase": "#090A09",
+      "bgElevated": "#111311",
+      "bgSurface": "#181B18",
+      "bgHover": "#212621",
+      "borderSubtle": "rgba(10, 249, 42, 0.14)",
+      "textPrimary": "#F2F5F2",
+      "textSecondary": "#A0B0A2",
+      "textMuted": "#5E6E60",
+      "accent": "#0AF92A",
+      "accentContrast": "#061108",
+      "accentSoft": "rgba(10, 249, 42, 0.14)",
+      "vizStart": "#0AF92A",
+      "vizEnd": "#49ECC1"
+    }
+  },
+  {
+    "id": "midnight-glass",
+    "name": "Midnight Glass",
+    "description": "Deep violet-navy canvas with neon rose and amethyst gradients",
+    "mode": "dark",
+    "fontDisplay": "'Inter', 'Segoe UI', system-ui, sans-serif",
+    "fontMono": "'JetBrains Mono', 'Cascadia Mono', Consolas, monospace",
+    "colors": {
+      "bgBase": "#0E0A1A",
+      "bgElevated": "#18112A",
+      "bgSurface": "#24193E",
+      "bgHover": "#332356",
+      "borderSubtle": "rgba(255, 255, 255, 0.10)",
+      "textPrimary": "#FAF7FF",
+      "textSecondary": "#C4B5E3",
+      "textMuted": "#8576A8",
+      "accent": "#F43F5E",
+      "accentContrast": "#FFFFFF",
+      "accentSoft": "rgba(244, 63, 94, 0.18)",
+      "vizStart": "#F43F5E",
+      "vizEnd": "#A855F7"
+    }
+  },
+  {
+    "id": "retro-vfd",
+    "name": "Retro VFD",
+    "description": "Classic Hi-Fi deck chassis with vacuum-fluorescent phosphor mint and amber peaks",
+    "mode": "dark",
+    "fontDisplay": "'JetBrains Mono', 'Cascadia Mono', Consolas, monospace",
+    "fontMono": "'JetBrains Mono', 'Cascadia Mono', Consolas, monospace",
+    "colors": {
+      "bgBase": "#070B0A",
+      "bgElevated": "#0C1210",
+      "bgSurface": "#121B18",
+      "bgHover": "#1A2823",
+      "borderSubtle": "rgba(46, 255, 195, 0.14)",
+      "textPrimary": "#E4FFF6",
+      "textSecondary": "#86C9B3",
+      "textMuted": "#4B8270",
+      "accent": "#2EFFC3",
+      "accentContrast": "#061108",
+      "accentSoft": "rgba(46, 255, 195, 0.14)",
+      "vizStart": "#2EFFC3",
+      "vizEnd": "#FFB020"
+    }
+  },
+  {
+    "id": "nord-frost",
+    "name": "Nord Frost",
+    "description": "Arctic slate palette paired with crisp glacier cyan highlights",
+    "mode": "dark",
+    "fontDisplay": "'Inter', 'Segoe UI', system-ui, sans-serif",
+    "fontMono": "'JetBrains Mono', 'Cascadia Mono', Consolas, monospace",
+    "colors": {
+      "bgBase": "#242933",
+      "bgElevated": "#2E3440",
+      "bgSurface": "#3B4252",
+      "bgHover": "#434C5E",
+      "borderSubtle": "rgba(216, 222, 233, 0.10)",
+      "textPrimary": "#ECEFF4",
+      "textSecondary": "#D8DEE9",
+      "textMuted": "#8892A6",
+      "accent": "#88C0D0",
+      "accentContrast": "#1A2029",
+      "accentSoft": "rgba(136, 192, 208, 0.18)",
+      "vizStart": "#81A1C1",
+      "vizEnd": "#88C0D0"
+    }
+  },
+  {
+    "id": "paper-minimal",
+    "name": "Paper Minimal",
+    "description": "Warm gallery paper surface with crisp ink typography and vermilion accents",
+    "mode": "light",
+    "fontDisplay": "'Inter', 'Segoe UI', system-ui, sans-serif",
+    "fontMono": "'JetBrains Mono', 'Cascadia Mono', Consolas, monospace",
+    "colors": {
+      "bgBase": "#F7F6F2",
+      "bgElevated": "#FFFFFF",
+      "bgSurface": "#EFECE4",
+      "bgHover": "#E5E1D6",
+      "borderSubtle": "rgba(24, 24, 27, 0.09)",
+      "textPrimary": "#18181B",
+      "textSecondary": "#52525B",
+      "textMuted": "#8A8A96",
+      "accent": "#E11D48",
+      "accentContrast": "#FFFFFF",
+      "accentSoft": "rgba(225, 29, 72, 0.12)",
+      "vizStart": "#E11D48",
+      "vizEnd": "#FB7185"
+    }
+  }
+]

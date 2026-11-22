@@ -1,0 +1,36 @@
+# Build artifacts & dependencies
+target/
+**/target/
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+
+# Environment & local secrets
+.env
+.env.*
+!.env.example
+
+# Databases & local user state
+*.db
+*.db-shm
+*.db-wal
+*.sqlite*
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Android (Phase 4)
+apps/android/.gradle/
+apps/android/build/
+apps/android/**/build/
+apps/android/local.properties
+*.apk
+*.aab
+
+# Docker server runtime volumes
+server-data/
+server-music/

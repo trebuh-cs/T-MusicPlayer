@@ -1,0 +1,26 @@
+[package]
+name = "t-music-desktop"
+version = "0.1.0"
+description = "Lightweight desktop music player with WMP import, themes, visualizer, and Internet Radio"
+authors = ["Tristan"]
+edition = "2021"
+
+[lib]
+name = "t_music_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+chrono = "0.4"
+dirs = "5"
+http = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+t-music-core = { path = "../../../crates/t-music-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+uuid = { version = "1", features = ["v4"] }
