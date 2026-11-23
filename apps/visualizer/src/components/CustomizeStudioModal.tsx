@@ -40,6 +40,7 @@ interface CustomizeStudioModalProps {
   monitors: MonitorInfo[];
   onRefreshHardware: () => void;
   onSelectDevice: (deviceId: string | null) => void;
+  onSelectMonitor: (monitorId: string | null) => void;
 }
 
 interface SliderRowProps {
@@ -124,6 +125,7 @@ export function CustomizeStudioModal({
   monitors,
   onRefreshHardware,
   onSelectDevice,
+  onSelectMonitor,
 }: CustomizeStudioModalProps) {
   const [simulatePreview, setSimulatePreview] = useState(true);
   const [imageError, setImageError] = useState<string | null>(null);
@@ -354,19 +356,25 @@ export function CustomizeStudioModal({
                 <label className="block space-y-1">
                   <span className="text-[11px] text-[var(--text-secondary)] flex items-center gap-1">
                     <Monitor className="w-3 h-3" />
-                    Wallpaper Display Monitor
+                    Wallpaper Display Mode &amp; Monitor
                   </span>
                   <select
                     value={config.selectedMonitorId ?? ""}
-                    onChange={(e) => patch("selectedMonitorId", e.target.value || null)}
+                    onChange={(e) => {
+                      const val = e.target.value || null;
+                      patch("selectedMonitorId", val);
+                      onSelectMonitor(val);
+                    }}
                     className="w-full px-3 py-2 rounded-lg text-xs bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
                   >
-                    <option value="">Primary Monitor</option>
+                    <option value="">
+                      Auto ({monitors.some((m) => m.id === "mirrored")
+                        ? "All Monitors Mirrored · Native Res"
+                        : "Primary Monitor"})
+                    </option>
                     {monitors.map((m) => (
                       <option key={m.id} value={m.id}>
                         {m.name}
-                        {m.id !== "all" ? ` (${m.width}x${m.height})` : ""}
-                        {m.is_primary ? " - Primary" : ""}
                       </option>
                     ))}
                   </select>

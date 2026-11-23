@@ -18,10 +18,24 @@ export const api = {
 
   listMonitors: () => invoke<MonitorInfo[]>("list_monitors"),
 
-  isWallpaperMode: () => invoke<boolLike>("is_wallpaper_mode") as Promise<boolean>,
+  isWallpaperMode: () => invoke<boolean>("is_wallpaper_mode"),
 
-  setWallpaperMode: (enabled: boolean, monitorId: string | null) =>
-    invoke<boolean>("set_wallpaper_mode", { enabled, monitorId }),
+  setWallpaperMode: (
+    enabled: boolean,
+    monitorId: string | null,
+    keepMainVisible = false
+  ) =>
+    invoke<boolean>("set_wallpaper_mode", {
+      enabled,
+      monitorId,
+      keepMainVisible,
+    }),
+
+  syncVisualizerConfig: (configJson: string) =>
+    invoke<void>("sync_visualizer_config", { configJson }),
+
+  getSyncedVisualizerConfig: () =>
+    invoke<string | null>("get_synced_visualizer_config"),
 
   setWindowFullscreen: (fullscreen: boolean) =>
     invoke<boolean>("set_window_fullscreen", { fullscreen }),
@@ -31,7 +45,7 @@ export const api = {
   loadImageAsDataUrl: (path: string) =>
     invoke<string>("load_image_as_data_url", { path }),
 
+  hideMainWindow: () => invoke<void>("hide_main_window"),
+
   quitApp: () => invoke<void>("quit_app"),
 };
-
-type boolLike = boolean;

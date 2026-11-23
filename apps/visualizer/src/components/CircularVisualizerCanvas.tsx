@@ -206,8 +206,8 @@ export const CircularVisualizerCanvas = memo(function CircularVisualizerCanvas({
     const updateSize = () => {
       const rect = el.getBoundingClientRect();
       if (rect.width > 0 && rect.height > 0) {
-        const nextW = Math.floor(rect.width);
-        const nextH = Math.floor(rect.height);
+        const nextW = Math.ceil(rect.width);
+        const nextH = Math.ceil(rect.height);
         setSize((prev) =>
           prev.width === nextW && prev.height === nextH
             ? prev

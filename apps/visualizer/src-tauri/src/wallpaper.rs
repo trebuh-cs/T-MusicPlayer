@@ -1,9 +1,14 @@
-//! Native Windows Live Desktop Wallpaper integration via `Progman` / `WorkerW`.
+//! Native Windows Live Desktop Wallpaper integration supporting:
+//! - Windows 11 24H2 / 25H2 / 26H2 Raised Desktop (`Progman` + `SHELLDLL_DefView` Z-order sandwich)
+//! - Classic Windows 10 / Windows 11 <=23H2 (`WorkerW` sibling)
+//! - True multi-monitor **Mirrored** mode (one pixel-exact native-resolution window per monitor,
+//!   handling mixed resolutions & mixed DPI scaling such as 200% + 100% with zero borders)
+//! - Zero interference with desktop icons (`SHELLDLL_DefView` / `SysListView32` are never altered or invalidated).
 
 use std::sync::Mutex;
 
 use serde::Serialize;
-use tauri::{Emitter, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MonitorInfo {
@@ -19,11 +24,9 @@ pub struct MonitorInfo {
 #[derive(Default)]
 struct WallpaperState {
     active: bool,
-    monitor_id: Option<String>,
-    saved_style: isize,
-    saved_ex_style: isize,
-    saved_rect: (i32, i32, i32, i32),
-    workerw_hwnd: isize,
+    mode_id: Option<String>,
+    window_labels: Vec<String>,
+    classic_workerw_hwnd: isize,
 }
 
 pub struct WallpaperManager {
@@ -52,53 +55,185 @@ impl WallpaperManager {
         }
     }
 
+    /// Enter (or reconfigure) Live Desktop Wallpaper mode using dedicated borderless child windows.
+    /// The `main` window itself is never reparented — it simply hides to the System Tray so users
+    /// can reopen Customize Studio cleanly at any time while wallpapers keep running live.
     pub fn enter(
         &self,
-        window: &WebviewWindow,
-        monitor_id: Option<String>,
+        app: &AppHandle,
+        mode_id: Option<String>,
+        hide_main: bool,
     ) -> Result<bool, String> {
         #[cfg(windows)]
         {
-            let mut guard = self.state.lock().map_err(|e| e.to_string())?;
-            win_wallpaper::attach_to_desktop(window, monitor_id.as_deref(), &mut guard)?;
-            let _ = window.emit("wallpaper-mode-changed", true);
+            // Cleanly close any previously spawned wallpaper surfaces first.
+            self.destroy_surfaces(app)?;
+
+            let all_monitors = win_wallpaper::enumerate_physical_monitors();
+            if all_monitors.is_empty() {
+                return Err("No displays detected.".to_string());
+            }
+
+            let effective_mode = mode_id.unwrap_or_else(|| {
+                if all_monitors.len() > 1 {
+                    "mirrored".to_string()
+                } else {
+                    all_monitors[0].id.clone()
+                }
+            });
+
+            let targets: Vec<MonitorInfo> = match effective_mode.as_str() {
+                "mirrored" => all_monitors.clone(),
+                "span" | "all" => vec![win_wallpaper::virtual_span_monitor(&all_monitors)],
+                specific => {
+                    if let Some(m) = all_monitors.iter().find(|m| m.id == specific) {
+                        vec![m.clone()]
+                    } else if let Some(primary) = all_monitors.iter().find(|m| m.is_primary) {
+                        vec![primary.clone()]
+                    } else {
+                        vec![all_monitors[0].clone()]
+                    }
+                }
+            };
+
+            let host = win_wallpaper::resolve_desktop_host();
+            let mut spawned_labels: Vec<String> = Vec::with_capacity(targets.len());
+
+            for (idx, target) in targets.iter().enumerate() {
+                let label = format!("wallpaper-{idx}");
+                let wp_win = WebviewWindowBuilder::new(
+                    app,
+                    &label,
+                    WebviewUrl::App("index.html?wallpaper=1".into()),
+                )
+                .title("T - Visualizer Wallpaper")
+                .decorations(false)
+                .shadow(false)
+                .resizable(false)
+                .skip_taskbar(true)
+                .visible(false)
+                .inner_size(640.0, 480.0)
+                .build()
+                .map_err(|e| format!("Failed creating wallpaper window for {}: {e}", target.name))?;
+
+                if let Err(err) = win_wallpaper::attach_surface_to_desktop(&wp_win, target, host) {
+                    let _ = wp_win.destroy();
+                    for prev in &spawned_labels {
+                        if let Some(w) = app.get_webview_window(prev) {
+                            let _ = w.destroy();
+                        }
+                    }
+                    return Err(err);
+                }
+
+                // Re-pulse WM_SIZE briefly after WebView2 finishes mounting so Chromium fills
+                // 100% of the monitor edge-to-edge even on mixed-DPI (200% + 100%) setups.
+                let app_clone = app.clone();
+                let label_clone = label.clone();
+                let target_w = target.width;
+                let target_h = target.height;
+                std::thread::spawn(move || {
+                    for delay_ms in [150u64, 450u64] {
+                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                        let app_inner = app_clone.clone();
+                        let lbl = label_clone.clone();
+                        let _ = app_clone.run_on_main_thread(move || {
+                            if let Some(w) = app_inner.get_webview_window(&lbl) {
+                                win_wallpaper::sync_surface_size(&w, target_w, target_h);
+                            }
+                        });
+                    }
+                });
+
+                spawned_labels.push(label);
+            }
+
+            {
+                let mut guard = self.state.lock().map_err(|e| e.to_string())?;
+                guard.active = true;
+                guard.mode_id = Some(effective_mode);
+                guard.window_labels = spawned_labels;
+                guard.classic_workerw_hwnd = host.classic_worker_raw();
+            }
+
+            if hide_main {
+                if let Some(main_win) = app.get_webview_window("main") {
+                    let _ = main_win.set_fullscreen(false);
+                    let _ = main_win.hide();
+                }
+            }
+
+            let _ = app.emit("wallpaper-mode-changed", true);
             Ok(true)
         }
         #[cfg(not(windows))]
         {
-            let _ = (window, monitor_id);
+            let _ = (app, mode_id, hide_main);
             Err("Wallpaper mode is only supported on Windows.".to_string())
         }
     }
 
-    pub fn exit(&self, window: &WebviewWindow) -> Result<bool, String> {
+    /// Exit Live Desktop Wallpaper mode, cleanly destroying all wallpaper surfaces and restoring `main`.
+    pub fn exit(&self, app: &AppHandle, show_main: bool) -> Result<bool, String> {
         #[cfg(windows)]
         {
-            let mut guard = self.state.lock().map_err(|e| e.to_string())?;
-            if !guard.active {
-                return Ok(false);
+            let was_active = self.destroy_surfaces(app)?;
+            if show_main {
+                if let Some(main_win) = app.get_webview_window("main") {
+                    let _ = main_win.show();
+                    let _ = main_win.unminimize();
+                    let _ = main_win.set_focus();
+                }
             }
-            win_wallpaper::detach_from_desktop(window, &mut guard)?;
-            let _ = window.emit("wallpaper-mode-changed", false);
+            if was_active {
+                let _ = app.emit("wallpaper-mode-changed", false);
+            }
             Ok(false)
         }
         #[cfg(not(windows))]
         {
-            let _ = window;
+            let _ = (app, show_main);
             Ok(false)
         }
     }
 
-    pub fn toggle(
-        &self,
-        window: &WebviewWindow,
-        monitor_id: Option<String>,
-    ) -> Result<bool, String> {
+    pub fn toggle(&self, app: &AppHandle, mode_id: Option<String>) -> Result<bool, String> {
         if self.is_active() {
-            self.exit(window)
+            self.exit(app, true)
         } else {
-            self.enter(window, monitor_id)
+            let saved_mode = mode_id.or_else(|| {
+                self.state
+                    .lock()
+                    .ok()
+                    .and_then(|s| s.mode_id.clone())
+            });
+            self.enter(app, saved_mode, true)
         }
+    }
+
+    #[cfg(windows)]
+    fn destroy_surfaces(&self, app: &AppHandle) -> Result<bool, String> {
+        let (was_active, labels, classic_worker) = {
+            let mut guard = self.state.lock().map_err(|e| e.to_string())?;
+            let was = guard.active || !guard.window_labels.is_empty();
+            let labels = std::mem::take(&mut guard.window_labels);
+            let cw = guard.classic_workerw_hwnd;
+            guard.active = false;
+            guard.classic_workerw_hwnd = 0;
+            (was, labels, cw)
+        };
+
+        for label in labels {
+            if let Some(w) = app.get_webview_window(&label) {
+                win_wallpaper::detach_and_destroy_surface(&w);
+            }
+        }
+
+        if was_active && classic_worker != 0 {
+            win_wallpaper::refresh_classic_worker_only(classic_worker);
+        }
+
+        Ok(was_active)
     }
 }
 
@@ -106,25 +241,51 @@ impl WallpaperManager {
 mod win_wallpaper {
     use super::*;
     use std::ffi::c_void;
+    use std::thread;
+    use std::time::Duration;
 
     use windows::core::w;
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT, WPARAM};
+    use windows::Win32::Foundation::{BOOL, COLORREF, HWND, LPARAM, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::{
-        EnumDisplayMonitors, GetMonitorInfoW, RedrawWindow, ScreenToClient, HDC, HMONITOR,
-        MONITORINFOEXW, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RDW_UPDATENOW,
+        EnumDisplayMonitors, GetMonitorInfoW, InvalidateRect, HDC, HMONITOR, MONITORINFOEXW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, FindWindowExW, FindWindowW, GetSystemMetrics, GetWindowLongPtrW,
-        GetWindowRect, SendMessageTimeoutW, SetForegroundWindow, SetParent, SetWindowLongPtrW,
-        SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP,
-        SMTO_NORMAL, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
-        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-        SW_SHOW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW,
-        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
-        WS_THICKFRAME, WS_VISIBLE,
+        GetWindowRect, SendMessageTimeoutW, SendMessageW, SetLayeredWindowAttributes, SetParent,
+        SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE, HWND_BOTTOM, HWND_TOP,
+        LWA_ALPHA, SMTO_NORMAL, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
+        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOSENDCHANGING,
+        SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNA, WM_SIZE, WS_BORDER, WS_CAPTION, WS_CHILD,
+        WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_DLGFRAME, WS_EX_APPWINDOW, WS_EX_CLIENTEDGE,
+        WS_EX_DLGMODALFRAME, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+        WS_EX_STATICEDGE, WS_EX_TOOLWINDOW, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+        WS_POPUP, WS_SYSMENU, WS_THICKFRAME, WS_VISIBLE,
     };
 
     const MONITORINFOF_PRIMARY: u32 = 1;
+
+    #[derive(Clone, Copy)]
+    pub enum DesktopHost {
+        /// Windows 11 24H2 / 25H2 / 26H2 Raised Desktop:
+        /// `SHELLDLL_DefView` is a direct child of `Progman`.
+        /// We attach our layered child window directly to `Progman` and insert it strictly
+        /// BEHIND `def_view` — never modifying or invalidating desktop icons.
+        RaisedProgman { progman: HWND, def_view: HWND },
+        /// Classic Windows 10 & Windows 11 <=23H2:
+        /// Standalone top-level `WorkerW` behind the `WorkerW` holding `SHELLDLL_DefView`.
+        ClassicWorkerW { workerw: HWND },
+        /// Safe fallback if shell hides both layers.
+        FallbackBottom,
+    }
+
+    impl DesktopHost {
+        pub fn classic_worker_raw(self) -> isize {
+            match self {
+                DesktopHost::ClassicWorkerW { workerw } => workerw.0 as isize,
+                _ => 0,
+            }
+        }
+    }
 
     unsafe extern "system" fn monitor_enum_proc(
         hmonitor: HMONITOR,
@@ -159,7 +320,7 @@ mod win_wallpaper {
         BOOL(1)
     }
 
-    pub fn enumerate_monitors() -> Vec<MonitorInfo> {
+    pub fn enumerate_physical_monitors() -> Vec<MonitorInfo> {
         let mut list: Vec<MonitorInfo> = Vec::new();
         unsafe {
             let _ = EnumDisplayMonitors(
@@ -184,27 +345,77 @@ mod win_wallpaper {
                 });
             }
         }
-        if list.len() > 1 {
-            unsafe {
-                let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-                let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-                let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-                let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-                list.push(MonitorInfo {
-                    id: "all".to_string(),
-                    name: format!("All Monitors Span ({vw}×{vh})"),
+        list
+    }
+
+    pub fn virtual_span_monitor(monitors: &[MonitorInfo]) -> MonitorInfo {
+        unsafe {
+            let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            if vw > 0 && vh > 0 {
+                return MonitorInfo {
+                    id: "span".to_string(),
+                    name: format!("All Monitors · Stretched Span ({vw}×{vh})"),
                     x: vx,
                     y: vy,
                     width: vw,
                     height: vh,
                     is_primary: false,
-                });
+                };
             }
         }
-        list
+        let min_x = monitors.iter().map(|m| m.x).min().unwrap_or(0);
+        let min_y = monitors.iter().map(|m| m.y).min().unwrap_or(0);
+        let max_x = monitors
+            .iter()
+            .map(|m| m.x + m.width)
+            .max()
+            .unwrap_or(1920);
+        let max_y = monitors
+            .iter()
+            .map(|m| m.y + m.height)
+            .max()
+            .unwrap_or(1080);
+        MonitorInfo {
+            id: "span".to_string(),
+            name: format!("All Monitors · Stretched Span ({}×{})", max_x - min_x, max_y - min_y),
+            x: min_x,
+            y: min_y,
+            width: max_x - min_x,
+            height: max_y - min_y,
+            is_primary: false,
+        }
     }
 
-    unsafe extern "system" fn find_workerw_enum_proc(top_hwnd: HWND, lparam: LPARAM) -> BOOL {
+    /// Returns the list shown in the UI monitor selector:
+    /// - When multiple monitors exist: `mirrored` first (native per-monitor windows),
+    ///   then each individual monitor, then optional `span`.
+    pub fn enumerate_monitors() -> Vec<MonitorInfo> {
+        let physical = enumerate_physical_monitors();
+        if physical.len() <= 1 {
+            return physical;
+        }
+        let mut options = Vec::with_capacity(physical.len() + 2);
+        options.push(MonitorInfo {
+            id: "mirrored".to_string(),
+            name: format!(
+                "All {} Monitors · Mirrored (Native Resolution)",
+                physical.len()
+            ),
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            is_primary: false,
+        });
+        options.extend(physical.iter().cloned());
+        options.push(virtual_span_monitor(&physical));
+        options
+    }
+
+    unsafe extern "system" fn find_classic_workerw_proc(top_hwnd: HWND, lparam: LPARAM) -> BOOL {
         if let Ok(def_view) = FindWindowExW(top_hwnd, HWND::default(), w!("SHELLDLL_DefView"), None)
         {
             if !def_view.0.is_null() {
@@ -219,13 +430,56 @@ mod win_wallpaper {
         BOOL(1)
     }
 
-    fn resolve_workerw() -> Option<HWND> {
+    unsafe fn find_existing_classic_workerw() -> Option<HWND> {
+        let mut found: isize = 0;
+        let _ = EnumWindows(
+            Some(find_classic_workerw_proc),
+            LPARAM(&mut found as *mut isize as isize),
+        );
+        if found != 0 {
+            Some(HWND(found as *mut c_void))
+        } else {
+            None
+        }
+    }
+
+    /// Detects the desktop host layer WITHOUT disturbing desktop icons.
+    /// Crucially, on Windows 11 24H2/25H2/26H2 (`WS_EX_NOREDIRECTIONBITMAP` Progman),
+    /// `SHELLDLL_DefView` and `WorkerW` already exist as direct children of `Progman`,
+    /// so we NEVER spam `0x052C` (which can reset mixed-DPI icon layouts).
+    pub fn resolve_desktop_host() -> DesktopHost {
         unsafe {
-            let progman = FindWindowW(w!("Progman"), None).ok()?;
+            let Ok(progman) = FindWindowW(w!("Progman"), None) else {
+                return DesktopHost::FallbackBottom;
+            };
             if progman.0.is_null() {
-                return None;
+                return DesktopHost::FallbackBottom;
             }
-            // Ask Explorer / Progman to spawn the behind-icons WorkerW layer.
+
+            // 1. Check for Windows 11 24H2+ Raised Desktop FIRST (without sending 0x052C).
+            let progman_ex = GetWindowLongPtrW(progman, GWL_EXSTYLE) as u32;
+            let is_raised = (progman_ex & WS_EX_NOREDIRECTIONBITMAP.0) != 0;
+            let direct_def_view =
+                FindWindowExW(progman, HWND::default(), w!("SHELLDLL_DefView"), None)
+                    .ok()
+                    .filter(|h| !h.0.is_null());
+            let direct_worker = FindWindowExW(progman, HWND::default(), w!("WorkerW"), None)
+                .ok()
+                .filter(|h| !h.0.is_null());
+
+            if let Some(def_view) = direct_def_view {
+                if is_raised || direct_worker.is_some() {
+                    return DesktopHost::RaisedProgman { progman, def_view };
+                }
+            }
+
+            // 2. Check if a Classic WorkerW already exists (again, no 0x052C needed).
+            if let Some(workerw) = find_existing_classic_workerw() {
+                return DesktopHost::ClassicWorkerW { workerw };
+            }
+
+            // 3. Only on Win10 / Win11 <=23H2 where WorkerW has not been spawned yet:
+            //    send 0x052C ONCE to spawn the classic WorkerW behind SHELLDLL_DefView.
             let mut result: usize = 0;
             let _ = SendMessageTimeoutW(
                 progman,
@@ -236,191 +490,187 @@ mod win_wallpaper {
                 1000,
                 Some(&mut result),
             );
-            let _ = SendMessageTimeoutW(
-                progman,
-                0x052C,
-                WPARAM(0),
-                LPARAM(0),
-                SMTO_NORMAL,
-                1000,
-                Some(&mut result),
-            );
+            thread::sleep(Duration::from_millis(40));
 
-            // 1. Classic Win10 & Win11 (<= 23H2): top-level WorkerW sibling behind SHELLDLL_DefView.
-            let mut found: isize = 0;
-            let _ = EnumWindows(
-                Some(find_workerw_enum_proc),
-                LPARAM(&mut found as *mut isize as isize),
-            );
-            if found != 0 {
-                return Some(HWND(found as *mut c_void));
+            if let Some(workerw) = find_existing_classic_workerw() {
+                return DesktopHost::ClassicWorkerW { workerw };
             }
 
-            // 2. Win11 24H2 raised Progman: WorkerW is a direct child of Progman behind SHELLDLL_DefView.
-            if let Ok(child_worker) =
-                FindWindowExW(progman, HWND::default(), w!("WorkerW"), None)
+            // Re-check raised Progman if 0x052C spawned a child WorkerW under Progman.
+            if let Ok(def_view) =
+                FindWindowExW(progman, HWND::default(), w!("SHELLDLL_DefView"), None)
             {
-                if !child_worker.0.is_null() {
-                    return Some(child_worker);
+                if !def_view.0.is_null() {
+                    return DesktopHost::RaisedProgman { progman, def_view };
                 }
             }
 
-            None
+            DesktopHost::FallbackBottom
         }
     }
 
-    pub fn attach_to_desktop(
+    pub fn attach_surface_to_desktop(
         window: &WebviewWindow,
-        monitor_id: Option<&str>,
-        state: &mut WallpaperState,
+        target: &MonitorInfo,
+        host: DesktopHost,
     ) -> Result<(), String> {
         let raw_hwnd = window
             .hwnd()
-            .map_err(|e| format!("Could not get window handle: {e}"))?;
-        let hwnd = HWND(raw_hwnd.0 as *mut c_void);
-
-        // Exit fullscreen cleanly first so Windows restores normal framing before parenting.
-        let _ = window.set_fullscreen(false);
-
-        let monitors = enumerate_monitors();
-        let target = monitor_id
-            .and_then(|id| monitors.iter().find(|m| m.id == id))
-            .or_else(|| monitors.iter().find(|m| m.is_primary))
-            .or_else(|| monitors.first())
-            .ok_or_else(|| "No monitor detected".to_string())?;
-
-        unsafe {
-            if !state.active {
-                state.saved_style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-                state.saved_ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                let mut rect = RECT::default();
-                if GetWindowRect(hwnd, &mut rect).is_ok() {
-                    state.saved_rect = (
-                        rect.left,
-                        rect.top,
-                        (rect.right - rect.left).max(640),
-                        (rect.bottom - rect.top).max(420),
-                    );
-                } else {
-                    state.saved_rect = (120, 120, 1160, 740);
-                }
-            }
-
-            let workerw = resolve_workerw();
-            if let Some(worker) = workerw {
-                let clean_style = (state.saved_style
-                    & !(WS_CAPTION.0
-                        | WS_THICKFRAME.0
-                        | WS_MINIMIZEBOX.0
-                        | WS_MAXIMIZEBOX.0
-                        | WS_SYSMENU.0
-                        | WS_POPUP.0) as isize)
-                    | (WS_CHILD.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0 | WS_CLIPCHILDREN.0) as isize;
-                let clean_ex = (state.saved_ex_style & !(WS_EX_APPWINDOW.0 as isize))
-                    | (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as isize;
-
-                SetWindowLongPtrW(hwnd, GWL_STYLE, clean_style);
-                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, clean_ex);
-                let _ = SetParent(hwnd, worker);
-
-                let mut pt = POINT {
-                    x: target.x,
-                    y: target.y,
-                };
-                let _ = ScreenToClient(worker, &mut pt);
-
-                let _ = SetWindowPos(
-                    hwnd,
-                    HWND_TOP,
-                    pt.x,
-                    pt.y,
-                    target.width,
-                    target.height,
-                    SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED,
-                );
-                state.workerw_hwnd = worker.0 as isize;
-            } else {
-                // Safe fallback if shell does not expose WorkerW: bottom-most borderless desktop window.
-                let clean_style = (state.saved_style
-                    & !(WS_CAPTION.0 | WS_THICKFRAME.0 | WS_SYSMENU.0) as isize)
-                    | (WS_POPUP.0 | WS_VISIBLE.0) as isize;
-                let clean_ex = (state.saved_ex_style & !(WS_EX_APPWINDOW.0 as isize))
-                    | (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as isize;
-                SetWindowLongPtrW(hwnd, GWL_STYLE, clean_style);
-                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, clean_ex);
-                let _ = SetWindowPos(
-                    hwnd,
-                    HWND_BOTTOM,
-                    target.x,
-                    target.y,
-                    target.width,
-                    target.height,
-                    SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED,
-                );
-                state.workerw_hwnd = 0;
-            }
-
-            state.active = true;
-            state.monitor_id = Some(target.id.clone());
-        }
-
-        Ok(())
-    }
-
-    pub fn detach_from_desktop(
-        window: &WebviewWindow,
-        state: &mut WallpaperState,
-    ) -> Result<(), String> {
-        let raw_hwnd = window
-            .hwnd()
-            .map_err(|e| format!("Could not get window handle: {e}"))?;
+            .map_err(|e| format!("Could not get wallpaper HWND: {e}"))?;
         let hwnd = HWND(raw_hwnd.0 as *mut c_void);
 
         unsafe {
-            let _ = SetParent(hwnd, HWND::default());
-            if state.saved_style != 0 {
-                SetWindowLongPtrW(hwnd, GWL_STYLE, state.saved_style);
-            }
-            if state.saved_ex_style != 0 {
-                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, state.saved_ex_style);
-            }
-            let (rx, ry, rw, rh) = state.saved_rect;
+            // Step 1: While still top-level & hidden, place on the exact target monitor in physical
+            // pixels so Windows delivers the target monitor's real DPI (e.g. 200% vs 100%) to WebView2
+            // before reparenting as WS_CHILD (WS_CHILD windows do not receive WM_DPICHANGED).
             let _ = SetWindowPos(
                 hwnd,
-                HWND_NOTOPMOST,
-                rx,
-                ry,
-                rw.max(640),
-                rh.max(420),
-                SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+                HWND_BOTTOM,
+                target.x,
+                target.y,
+                target.width,
+                target.height,
+                SWP_NOACTIVATE | SWP_NOSENDCHANGING,
             );
-            let _ = ShowWindow(hwnd, SW_SHOW);
-            let _ = SetForegroundWindow(hwnd);
+            let _ = window.set_size(tauri::PhysicalSize::new(
+                target.width.max(1) as u32,
+                target.height.max(1) as u32,
+            ));
 
-            // Trigger Windows Explorer to repaint the user's original desktop wallpaper cleanly.
-            if state.workerw_hwnd != 0 {
-                let worker = HWND(state.workerw_hwnd as *mut c_void);
-                let _ = RedrawWindow(
-                    worker,
-                    None,
-                    None,
-                    RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW,
-                );
-            }
-            if let Ok(progman) = FindWindowW(w!("Progman"), None) {
-                if !progman.0.is_null() {
-                    let _ = RedrawWindow(
-                        progman,
-                        None,
-                        None,
-                        RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW,
+            // Step 2: Strip EVERY border/frame/edge style so zero invisible margin or shadow remains.
+            let orig_style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            let orig_ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            let strip_style = (WS_CAPTION.0
+                | WS_THICKFRAME.0
+                | WS_BORDER.0
+                | WS_DLGFRAME.0
+                | WS_MINIMIZEBOX.0
+                | WS_MAXIMIZEBOX.0
+                | WS_SYSMENU.0
+                | WS_POPUP.0) as isize;
+            let strip_ex = (WS_EX_APPWINDOW.0
+                | WS_EX_DLGMODALFRAME.0
+                | WS_EX_WINDOWEDGE.0
+                | WS_EX_CLIENTEDGE.0
+                | WS_EX_STATICEDGE.0) as isize;
+
+            match host {
+                DesktopHost::RaisedProgman { progman, def_view } => {
+                    let clean_style = (orig_style & !strip_style)
+                        | (WS_CHILD.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0 | WS_CLIPCHILDREN.0)
+                            as isize;
+                    let clean_ex = (orig_ex & !strip_ex)
+                        | (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0 | WS_EX_LAYERED.0) as isize;
+
+                    SetWindowLongPtrW(hwnd, GWL_STYLE, clean_style);
+                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, clean_ex);
+                    let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+                    let _ = SetParent(hwnd, progman);
+
+                    let mut parent_rect = RECT::default();
+                    let _ = GetWindowRect(progman, &mut parent_rect);
+                    let local_x = target.x - parent_rect.left;
+                    let local_y = target.y - parent_rect.top;
+
+                    // Insert strictly BEHIND `def_view` (desktop icons stay on top, 100% untouched).
+                    let _ = SetWindowPos(
+                        hwnd,
+                        def_view,
+                        local_x,
+                        local_y,
+                        target.width,
+                        target.height,
+                        SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED | SWP_NOSENDCHANGING,
+                    );
+                }
+                DesktopHost::ClassicWorkerW { workerw } => {
+                    let clean_style = (orig_style & !strip_style)
+                        | (WS_CHILD.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0 | WS_CLIPCHILDREN.0)
+                            as isize;
+                    let clean_ex = (orig_ex & !strip_ex)
+                        | (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as isize;
+
+                    SetWindowLongPtrW(hwnd, GWL_STYLE, clean_style);
+                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, clean_ex);
+                    let _ = SetParent(hwnd, workerw);
+
+                    let mut parent_rect = RECT::default();
+                    let _ = GetWindowRect(workerw, &mut parent_rect);
+                    let local_x = target.x - parent_rect.left;
+                    let local_y = target.y - parent_rect.top;
+
+                    let _ = SetWindowPos(
+                        hwnd,
+                        HWND_TOP,
+                        local_x,
+                        local_y,
+                        target.width,
+                        target.height,
+                        SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED | SWP_NOSENDCHANGING,
+                    );
+                }
+                DesktopHost::FallbackBottom => {
+                    let clean_style =
+                        (orig_style & !strip_style) | (WS_POPUP.0 | WS_VISIBLE.0) as isize;
+                    let clean_ex = (orig_ex & !strip_ex)
+                        | (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as isize;
+
+                    SetWindowLongPtrW(hwnd, GWL_STYLE, clean_style);
+                    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, clean_ex);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        HWND_BOTTOM,
+                        target.x,
+                        target.y,
+                        target.width,
+                        target.height,
+                        SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED | SWP_NOSENDCHANGING,
                     );
                 }
             }
 
-            state.active = false;
-            state.workerw_hwnd = 0;
+            let _ = ShowWindow(hwnd, SW_SHOWNA);
+
+            // Step 3: Explicitly sync WebView2 controller surface bounds to the exact physical
+            // width x height so Chromium fills every pixel edge-to-edge with zero borders.
+            let packed_size = (((target.height as u16) as usize) << 16)
+                | ((target.width as u16) as usize);
+            let _ = SendMessageW(hwnd, WM_SIZE, WPARAM(0), LPARAM(packed_size as isize));
         }
+
         Ok(())
+    }
+
+    pub fn sync_surface_size(window: &WebviewWindow, width: i32, height: i32) {
+        if let Ok(raw_hwnd) = window.hwnd() {
+            let hwnd = HWND(raw_hwnd.0 as *mut c_void);
+            unsafe {
+                let packed_size =
+                    (((height as u16) as usize) << 16) | ((width as u16) as usize);
+                let _ = SendMessageW(hwnd, WM_SIZE, WPARAM(0), LPARAM(packed_size as isize));
+            }
+        }
+    }
+
+    pub fn detach_and_destroy_surface(window: &WebviewWindow) {
+        if let Ok(raw_hwnd) = window.hwnd() {
+            let hwnd = HWND(raw_hwnd.0 as *mut c_void);
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+                let _ = SetParent(hwnd, HWND::default());
+            }
+        }
+        let _ = window.destroy();
+    }
+
+    /// Only invalidates the classic background WorkerW (never `Progman` or `SHELLDLL_DefView`).
+    pub fn refresh_classic_worker_only(classic_worker_raw: isize) {
+        if classic_worker_raw == 0 {
+            return;
+        }
+        unsafe {
+            let worker = HWND(classic_worker_raw as *mut c_void);
+            let _ = InvalidateRect(worker, None, true);
+        }
     }
 }

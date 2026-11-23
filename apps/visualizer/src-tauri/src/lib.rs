@@ -1,18 +1,22 @@
-//! Tauri v2 standalone Windows visualizer with WASAPI loopback FFT, System Tray, and Live Desktop Wallpaper mode.
+//! Tauri v2 standalone Windows visualizer with WASAPI loopback FFT, System Tray, and
+//! multi-monitor native-resolution Live Desktop Wallpaper mode.
 
 mod audio;
 mod wallpaper;
 
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
 
 use base64::Engine as _;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Emitter, Manager, RunEvent, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewWindow};
 
 use crate::audio::{AudioDeviceInfo, AudioEngine, AudioStatus};
 use crate::wallpaper::{MonitorInfo, WallpaperManager};
+
+struct SyncedConfigState(Mutex<Option<String>>);
 
 #[tauri::command]
 fn get_fft_frame(audio: State<'_, AudioEngine>) -> tauri::ipc::Response {
@@ -46,27 +50,42 @@ fn is_wallpaper_mode(wp: State<'_, WallpaperManager>) -> bool {
 
 #[tauri::command]
 fn set_wallpaper_mode(
-    window: WebviewWindow,
+    app: AppHandle,
     wp: State<'_, WallpaperManager>,
     enabled: bool,
     monitor_id: Option<String>,
+    keep_main_visible: Option<bool>,
 ) -> Result<bool, String> {
     if enabled {
-        wp.enter(&window, monitor_id)
+        let hide_main = !keep_main_visible.unwrap_or(false);
+        wp.enter(&app, monitor_id, hide_main)
     } else {
-        wp.exit(&window)
+        wp.exit(&app, true)
     }
+}
+
+#[tauri::command]
+fn sync_visualizer_config(
+    app: AppHandle,
+    cfg_state: State<'_, SyncedConfigState>,
+    config_json: String,
+) {
+    if let Ok(mut guard) = cfg_state.0.lock() {
+        *guard = Some(config_json.clone());
+    }
+    let _ = app.emit("visualizer-config-sync", config_json);
+}
+
+#[tauri::command]
+fn get_synced_visualizer_config(cfg_state: State<'_, SyncedConfigState>) -> Option<String> {
+    cfg_state.0.lock().ok().and_then(|g| g.clone())
 }
 
 #[tauri::command]
 fn set_window_fullscreen(
     window: WebviewWindow,
-    wp: State<'_, WallpaperManager>,
     fullscreen: bool,
 ) -> Result<bool, String> {
-    if wp.is_active() && fullscreen {
-        let _ = wp.exit(&window);
-    }
     window
         .set_fullscreen(fullscreen)
         .map_err(|e| format!("Failed toggling fullscreen: {e}"))?;
@@ -107,11 +126,16 @@ fn load_image_as_data_url(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn quit_app(app: tauri::AppHandle) {
+fn hide_main_window(app: AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        let wp = app.state::<WallpaperManager>();
-        let _ = wp.exit(&window);
+        let _ = window.hide();
     }
+}
+
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    let wp = app.state::<WallpaperManager>();
+    let _ = wp.exit(&app, false);
     let audio = app.state::<AudioEngine>();
     audio.stop();
     app.exit(0);
@@ -124,6 +148,7 @@ pub fn run() {
         .setup(|app| {
             app.manage(AudioEngine::start());
             app.manage(WallpaperManager::new());
+            app.manage(SyncedConfigState(Mutex::new(None)));
 
             let open_item = MenuItem::with_id(
                 app,
@@ -159,34 +184,27 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "open_studio" => {
                         if let Some(window) = app.get_webview_window("main") {
-                            let wp = app.state::<WallpaperManager>();
-                            let _ = wp.exit(&window);
                             let _ = window.show();
+                            let _ = window.unminimize();
                             let _ = window.set_focus();
                             let _ = window.emit("open-customize", ());
                         }
                     }
                     "toggle_wallpaper" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let wp = app.state::<WallpaperManager>();
-                            let _ = wp.toggle(&window, None);
-                        }
+                        let wp = app.state::<WallpaperManager>();
+                        let _ = wp.toggle(app, None);
                     }
                     "toggle_fullscreen" => {
                         if let Some(window) = app.get_webview_window("main") {
-                            let wp = app.state::<WallpaperManager>();
-                            if wp.is_active() {
-                                let _ = wp.exit(&window);
-                            }
+                            let _ = window.show();
+                            let _ = window.set_focus();
                             let next = !window.is_fullscreen().unwrap_or(false);
                             let _ = window.set_fullscreen(next);
                         }
                     }
                     "quit" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let wp = app.state::<WallpaperManager>();
-                            let _ = wp.exit(&window);
-                        }
+                        let wp = app.state::<WallpaperManager>();
+                        let _ = wp.exit(app, false);
                         app.state::<AudioEngine>().stop();
                         app.exit(0);
                     }
@@ -201,9 +219,8 @@ pub fn run() {
                     {
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("main") {
-                            let wp = app.state::<WallpaperManager>();
-                            let _ = wp.exit(&window);
                             let _ = window.show();
+                            let _ = window.unminimize();
                             let _ = window.set_focus();
                         }
                     }
@@ -224,9 +241,12 @@ pub fn run() {
             list_monitors,
             is_wallpaper_mode,
             set_wallpaper_mode,
+            sync_visualizer_config,
+            get_synced_visualizer_config,
             set_window_fullscreen,
             is_window_fullscreen,
             load_image_as_data_url,
+            hide_main_window,
             quit_app,
         ])
         .build(tauri::generate_context!())
@@ -234,10 +254,8 @@ pub fn run() {
 
     app.run(|app_handle, event| {
         if let RunEvent::Exit = event {
-            if let Some(window) = app_handle.get_webview_window("main") {
-                let wp = app_handle.state::<WallpaperManager>();
-                let _ = wp.exit(&window);
-            }
+            let wp = app_handle.state::<WallpaperManager>();
+            let _ = wp.exit(app_handle, false);
             app_handle.state::<AudioEngine>().stop();
         }
     });
