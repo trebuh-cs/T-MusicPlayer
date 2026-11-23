@@ -50,8 +50,9 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
       - name: Run Android Unit Tests & Build Debug APK
         working-directory: apps/android
         run: |
           chmod +x gradlew
-          ./gradlew testDebugUnitTest assembleDebug --no-daemon
+          ./gradlew testDebugUnitTest assembleDebug --no-daemon --stacktrace
