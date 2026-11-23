@@ -29,6 +29,7 @@ export interface AudioEngineState {
   queueIndex: number;
   isPlaying: boolean;
   isBuffering: boolean;
+  isAutoMixActive: boolean;
   volume: number;
   isMuted: boolean;
   playbackRate: number;
@@ -40,6 +41,7 @@ export interface AudioEngineState {
   getTimeSnapshot: () => TimeSnapshot;
   subscribeTime: (listener: () => void) => () => void;
   playTrack: (track: Track, contextQueue?: Track[]) => void;
+  playAutoMixTrack: (track: Track) => void;
   playRadio: (station: RadioStation) => void;
   playNextInQueue: (track: Track) => void;
   enqueueTrack: (track: Track) => void;
@@ -71,14 +73,17 @@ function applyPitchPreservedSpeed(audioEl: HTMLAudioElement, rate: number): void
 }
 
 export function useAudioEngine(
-  onTrackPlayRecorded?: (trackId: string) => void,
-  resolveTrackUrl?: (track: Track) => string
+  onTrackPlayRecorded?: (track: Track, isManual: boolean) => void,
+  resolveTrackUrl?: (track: Track) => string,
+  onTrackSkipped?: (track: Track) => void,
+  autoNextTrackProvider?: (currentTrackId: string | null) => Track | null
 ): AudioEngineState {
   const [nowPlaying, setNowPlaying] = useState<PlayingItem | null>(null);
   const [queue, setQueue] = useState<Track[]>([]);
   const [queueIndex, setQueueIndex] = useState<number>(-1);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
+  const [isAutoMixActive, setIsAutoMixActive] = useState(false);
   const [volume, setVolumeState] = useState(0.85);
   const [isMuted, setIsMuted] = useState(false);
   const [playbackRate, setPlaybackRateState] = useState(1.0);
@@ -122,6 +127,8 @@ export function useAudioEngine(
   const liveEditPreviewRef = useRef<{ trackId: string; edit: TrackEditDraft } | null>(null);
   const pendingStartSecRef = useRef<number | null>(null);
   const trimEndTriggeredForRef = useRef<string | null>(null);
+  const isAutoMixActiveRef = useRef(false);
+  isAutoMixActiveRef.current = isAutoMixActive;
 
   // Refs for callbacks inside event listeners without stale closures.
   const queueRef = useRef(queue);
@@ -140,6 +147,12 @@ export function useAudioEngine(
   eqRef.current = eq;
   const resolveTrackUrlRef = useRef(resolveTrackUrl);
   resolveTrackUrlRef.current = resolveTrackUrl;
+  const onTrackPlayRecordedRef = useRef(onTrackPlayRecorded);
+  onTrackPlayRecordedRef.current = onTrackPlayRecorded;
+  const onTrackSkippedRef = useRef(onTrackSkipped);
+  onTrackSkippedRef.current = onTrackSkipped;
+  const autoNextTrackProviderRef = useRef(autoNextTrackProvider);
+  autoNextTrackProviderRef.current = autoNextTrackProvider;
 
   const resolveEffectiveTrackEdit = useCallback((track: Track): TrackEditDraft => {
     const preview = liveEditPreviewRef.current;
@@ -249,7 +262,7 @@ export function useAudioEngine(
   }, []);
 
   const startTrackElement = useCallback(
-    (track: Track) => {
+    (track: Track, isManual = false) => {
       stopRadioAudio();
       const localEl = localAudioRef.current;
       if (!localEl) return;
@@ -277,8 +290,10 @@ export function useAudioEngine(
           applyTrackPlaybackParams(track);
           setIsPlaying(true);
           setIsBuffering(false);
-          void api.recordPlay(track.id).catch(() => {});
-          onTrackPlayRecorded?.(track.id);
+          void api
+            .recordPlay(track.id, isManual)
+            .then((updated) => onTrackPlayRecordedRef.current?.(updated, isManual))
+            .catch(() => onTrackPlayRecordedRef.current?.(track, isManual));
         })
         .catch((err) => {
           setIsPlaying(false);
@@ -289,7 +304,6 @@ export function useAudioEngine(
     [
       applyTrackPlaybackParams,
       ensureLocalGraph,
-      onTrackPlayRecorded,
       resolveEffectiveTrackEdit,
       stopRadioAudio,
       updateTimeSnapshot,
@@ -298,6 +312,8 @@ export function useAudioEngine(
 
   const playTrack = useCallback(
     (track: Track, contextQueue?: Track[]) => {
+      setIsAutoMixActive(false);
+      isAutoMixActiveRef.current = false;
       const nextQueue = contextQueue && contextQueue.length > 0 ? contextQueue : [track];
       const idx = nextQueue.findIndex((t) => t.id === track.id);
       const resolvedQueue = idx >= 0 ? nextQueue : [track, ...nextQueue];
@@ -305,13 +321,30 @@ export function useAudioEngine(
 
       setQueue(resolvedQueue);
       setQueueIndex(resolvedIdx);
-      startTrackElement(track);
+      startTrackElement(track, true);
+    },
+    [startTrackElement]
+  );
+
+  const playAutoMixTrack = useCallback(
+    (track: Track) => {
+      setIsAutoMixActive(true);
+      isAutoMixActiveRef.current = true;
+      setQueue((prev) => {
+        const filtered = prev.filter((t) => t.id !== track.id);
+        const next = [...filtered, track].slice(-30);
+        setQueueIndex(next.length - 1);
+        return next;
+      });
+      startTrackElement(track, false);
     },
     [startTrackElement]
   );
 
   const playRadio = useCallback(
     (station: RadioStation) => {
+      setIsAutoMixActive(false);
+      isAutoMixActiveRef.current = false;
       stopLocalAudio();
       const radioEl = radioAudioRef.current;
       if (!radioEl) return;
@@ -345,9 +378,24 @@ export function useAudioEngine(
       const current = nowPlayingRef.current;
       if (!current || current.kind === "radio") return;
 
-      const list = queueRef.current;
-      const idx = queueIndexRef.current;
-      if (list.length === 0) return;
+      if (manual) {
+        const localEl = localAudioRef.current;
+        const edit = resolveEffectiveTrackEdit(current.track);
+        const startSec = edit.trim_start_ms > 0 ? edit.trim_start_ms / 1000 : 0;
+        const rawDurSec =
+          edit.trim_end_ms && edit.trim_end_ms > edit.trim_start_ms
+            ? (edit.trim_end_ms - edit.trim_start_ms) / 1000
+            : current.track.duration_ms > 0
+            ? current.track.duration_ms / 1000
+            : localEl?.duration || 0;
+        const elapsedSec = localEl ? Math.max(0, localEl.currentTime - startSec) : 0;
+        if (elapsedSec < Math.max(2, Math.min(30, rawDurSec * 0.5))) {
+          void api
+            .recordSkip(current.track.id)
+            .then((updated) => onTrackSkippedRef.current?.(updated))
+            .catch(() => onTrackSkippedRef.current?.(current.track));
+        }
+      }
 
       if (!manual && repeatRef.current === "one") {
         const localEl = localAudioRef.current;
@@ -360,6 +408,24 @@ export function useAudioEngine(
         }
         return;
       }
+
+      if (isAutoMixActiveRef.current) {
+        const picked = autoNextTrackProviderRef.current?.(current.track.id) ?? null;
+        if (picked) {
+          setQueue((prev) => {
+            const filtered = prev.filter((t) => t.id !== picked.id);
+            const next = [...filtered, picked].slice(-30);
+            setQueueIndex(next.length - 1);
+            return next;
+          });
+          startTrackElement(picked, false);
+          return;
+        }
+      }
+
+      const list = queueRef.current;
+      const idx = queueIndexRef.current;
+      if (list.length === 0) return;
 
       let nextIdx = -1;
       if (shuffleRef.current && list.length > 1) {
@@ -374,7 +440,7 @@ export function useAudioEngine(
 
       if (nextIdx >= 0 && list[nextIdx]) {
         setQueueIndex(nextIdx);
-        startTrackElement(list[nextIdx]);
+        startTrackElement(list[nextIdx], false);
       } else {
         setIsPlaying(false);
       }
@@ -734,6 +800,7 @@ export function useAudioEngine(
       queueIndex,
       isPlaying,
       isBuffering,
+      isAutoMixActive,
       volume,
       isMuted,
       playbackRate,
@@ -745,6 +812,7 @@ export function useAudioEngine(
       getTimeSnapshot,
       subscribeTime,
       playTrack,
+      playAutoMixTrack,
       playRadio,
       playNextInQueue,
       enqueueTrack,
@@ -769,6 +837,7 @@ export function useAudioEngine(
       queueIndex,
       isPlaying,
       isBuffering,
+      isAutoMixActive,
       volume,
       isMuted,
       playbackRate,
@@ -779,6 +848,7 @@ export function useAudioEngine(
       getTimeSnapshot,
       subscribeTime,
       playTrack,
+      playAutoMixTrack,
       playRadio,
       playNextInQueue,
       enqueueTrack,

@@ -3,9 +3,12 @@ import { createPortal } from "react-dom";
 import {
   ArrowDown,
   ArrowUp,
+  Ban,
+  CheckCircle2,
   Download,
   FolderOpen,
   FolderPlus,
+  GripVertical,
   Heart,
   ListPlus,
   MoreHorizontal,
@@ -56,6 +59,7 @@ interface TrackListProps {
   onEditTrack: (track: Track) => void;
   onDownloadAsMp3: (track: Track) => void;
   onRevealTrack: (track: Track) => void;
+  onToggleAutoExcluded?: (track: Track, excluded: boolean) => void;
   onRemoveFromPlaylist?: (trackId: string) => void;
   onReorderPlaylist?: (orderedIds: string[]) => void;
   onRenamePlaylist?: (newName: string) => void;
@@ -83,6 +87,7 @@ export const TrackList = memo(function TrackList({
   onEditTrack,
   onDownloadAsMp3,
   onRevealTrack,
+  onToggleAutoExcluded,
   onRemoveFromPlaylist,
   onReorderPlaylist,
   onRenamePlaylist,
@@ -95,6 +100,7 @@ export const TrackList = memo(function TrackList({
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(playlist?.name ?? "");
   const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
 
   useEffect(() => {
     if (!menuState) return;
@@ -146,6 +152,7 @@ export const TrackList = memo(function TrackList({
   };
 
   const handleDrop = (dropIndex: number) => {
+    setDragOverIndex(null);
     if (dragIndex === null || dragIndex === dropIndex || !onReorderPlaylist) {
       setDragIndex(null);
       return;
@@ -366,9 +373,19 @@ export const TrackList = memo(function TrackList({
                 <div
                   key={track.id}
                   draggable={Boolean(onReorderPlaylist)}
-                  onDragStart={() => setDragIndex(idx)}
+                  onDragStart={() => {
+                    setDragIndex(idx);
+                    setDragOverIndex(idx);
+                  }}
                   onDragOver={(e) => {
-                    if (onReorderPlaylist) e.preventDefault();
+                    if (onReorderPlaylist) {
+                      e.preventDefault();
+                      if (dragOverIndex !== idx) setDragOverIndex(idx);
+                    }
+                  }}
+                  onDragEnd={() => {
+                    setDragIndex(null);
+                    setDragOverIndex(null);
                   }}
                   onDrop={() => handleDrop(idx)}
                   onDoubleClick={() => onPlayTrack(track, tracks)}
@@ -376,28 +393,46 @@ export const TrackList = memo(function TrackList({
                     isActive
                       ? "bg-[var(--accent-soft)]"
                       : "hover:bg-[var(--bg-hover)]"
+                  } ${
+                    dragOverIndex === idx && dragIndex !== null && dragIndex !== idx
+                      ? "border-t-2 border-[var(--accent)]"
+                      : ""
                   }`}
                 >
-                  {/* Track Index / Active Indicator */}
-                  <button
-                    type="button"
-                    onClick={() => onPlayTrack(track, tracks)}
-                    className="flex items-center justify-center w-8 h-8 rounded-lg text-xs font-mono-num text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
-                    aria-label={`Play ${track.title}`}
-                  >
-                    {isActive && isPlaying ? (
-                      <span className="flex items-end gap-0.5 h-3.5">
-                        <span className="w-0.5 h-full bg-[var(--accent)] animate-eq-1 rounded-full" />
-                        <span className="w-0.5 h-full bg-[var(--accent)] animate-eq-2 rounded-full" />
-                        <span className="w-0.5 h-full bg-[var(--accent)] animate-eq-3 rounded-full" />
-                      </span>
-                    ) : (
-                      <>
-                        <span className="group-hover:hidden">{idx + 1}</span>
-                        <Play className="w-3.5 h-3.5 hidden group-hover:block text-[var(--accent)] fill-current" />
-                      </>
+                  {/* Track Index / Drag Handle / Active Indicator */}
+                  <div className="flex items-center justify-center w-8 h-8">
+                    {onReorderPlaylist && (
+                      <GripVertical
+                        className="w-3.5 h-3.5 text-[var(--text-muted)] group-hover:hidden cursor-grab active:cursor-grabbing shrink-0"
+                        aria-hidden
+                      />
                     )}
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => onPlayTrack(track, tracks)}
+                      className={`flex items-center justify-center w-8 h-8 rounded-lg text-xs font-mono-num text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer ${
+                        onReorderPlaylist ? "hidden group-hover:flex" : ""
+                      }`}
+                      aria-label={`Play ${track.title}`}
+                    >
+                      {isActive && isPlaying ? (
+                        <span className="flex items-end gap-0.5 h-3.5">
+                          <span className="w-0.5 h-full bg-[var(--accent)] animate-eq-1 rounded-full" />
+                          <span className="w-0.5 h-full bg-[var(--accent)] animate-eq-2 rounded-full" />
+                          <span className="w-0.5 h-full bg-[var(--accent)] animate-eq-3 rounded-full" />
+                        </span>
+                      ) : (
+                        <>
+                          {!onReorderPlaylist && <span className="group-hover:hidden">{idx + 1}</span>}
+                          <Play
+                            className={`w-3.5 h-3.5 text-[var(--accent)] fill-current ${
+                              onReorderPlaylist ? "block" : "hidden group-hover:block"
+                            }`}
+                          />
+                        </>
+                      )}
+                    </button>
+                  </div>
 
                   {/* Cover + Title + Artist */}
                   <div className="flex items-center gap-3 min-w-0">
@@ -561,6 +596,28 @@ export const TrackList = memo(function TrackList({
                 >
                   <FolderOpen className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
                   Show File Location
+                </button>
+              )}
+              {onToggleAutoExcluded && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onToggleAutoExcluded(menuState.track, !menuState.track.auto_excluded);
+                    setMenuState(null);
+                  }}
+                  className="w-full px-3 py-1.5 text-left flex items-center gap-2 hover:bg-[var(--bg-hover)] text-[var(--text-primary)] cursor-pointer"
+                >
+                  {menuState.track.auto_excluded ? (
+                    <>
+                      <CheckCircle2 className="w-3.5 h-3.5 text-[var(--accent)]" />
+                      Include in Auto Playlist
+                    </>
+                  ) : (
+                    <>
+                      <Ban className="w-3.5 h-3.5 text-rose-400" />
+                      Exclude from Auto Playlist
+                    </>
+                  )}
                 </button>
               )}
             </div>

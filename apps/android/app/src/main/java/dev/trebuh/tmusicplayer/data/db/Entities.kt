@@ -33,6 +33,12 @@ data class TrackEntity(
     val trimStartMs: Long = 0L,
     val trimEndMs: Long? = null,
     val editUpdatedAt: Long = 0L,
+    val playCount: Long = 0L,
+    val manualPlayCount: Long = 0L,
+    val skipCount: Long = 0L,
+    val autoExcluded: Boolean = false,
+    val lastPlayedAt: Long = 0L,
+    val statsUpdatedAt: Long = 0L,
     val localAudioPath: String? = null,
     val localCoverPath: String? = null,
 ) {

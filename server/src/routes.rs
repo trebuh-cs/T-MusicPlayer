@@ -19,6 +19,7 @@ use t_music_core::models::{
 };
 use t_music_core::scanner::{compute_file_hash, extract_track_metadata, scan_directory};
 use tower_http::cors::{Any, CorsLayer};
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use crate::auth::{hash_password, sign_token, verify_password, AuthUser};
@@ -432,6 +433,36 @@ fn session_dir_for_upload(data_dir: &Path, upload_id: &str) -> Result<PathBuf, (
         .join(parsed.to_string()))
 }
 
+/// Removes abandoned chunked-upload staging directories older than `max_age_secs`.
+pub fn cleanup_stale_upload_sessions(data_dir: &Path, max_age_secs: u64) -> usize {
+    let sessions_root = data_dir.join("uploads").join("sessions");
+    let Ok(entries) = fs::read_dir(&sessions_root) else {
+        return 0;
+    };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        let age_secs = now
+            .duration_since(modified)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if age_secs >= max_age_secs && fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 async fn upload_track_init(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -804,10 +835,10 @@ async fn stream_track(
         return builder.body(Body::from(buf)).unwrap();
     }
 
-    let mut buf = Vec::with_capacity(total_len as usize);
-    if file.read_to_end(&mut buf).is_err() {
+    let Ok(async_file) = tokio::fs::File::open(file_path).await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "Failed reading file").into_response();
-    }
+    };
+    let stream = ReaderStream::with_capacity(async_file, 64 * 1024);
 
     let mut builder = Response::builder()
         .status(StatusCode::OK)
@@ -822,7 +853,7 @@ async fn stream_track(
         );
     }
 
-    builder.body(Body::from(buf)).unwrap()
+    builder.body(Body::from_stream(stream)).unwrap()
 }
 
 async fn get_cover(
@@ -1205,7 +1236,7 @@ async fn serve_download_artifact(
     preferred_name: &str,
     content_type: &'static str,
 ) -> Response {
-    let Some((path, _, _)) = find_download_file(downloads_dir, ext, preferred_name) else {
+    let Some((path, size_bytes, _)) = find_download_file(downloads_dir, ext, preferred_name) else {
         return (
             StatusCode::NOT_FOUND,
             format!("No .{ext} installer uploaded yet"),
@@ -1213,9 +1244,10 @@ async fn serve_download_artifact(
             .into_response();
     };
 
-    let Ok(bytes) = tokio::fs::read(&path).await else {
+    let Ok(file) = tokio::fs::File::open(&path).await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "Failed reading installer").into_response();
     };
+    let stream = ReaderStream::with_capacity(file, 64 * 1024);
 
     Response::builder()
         .status(StatusCode::OK)
@@ -1225,8 +1257,8 @@ async fn serve_download_artifact(
             format!("attachment; filename=\"{preferred_name}\""),
         )
         .header(header::CACHE_CONTROL, "no-cache")
-        .header(header::CONTENT_LENGTH, bytes.len().to_string())
-        .body(Body::from(bytes))
+        .header(header::CONTENT_LENGTH, size_bytes.to_string())
+        .body(Body::from_stream(stream))
         .unwrap()
 }
 

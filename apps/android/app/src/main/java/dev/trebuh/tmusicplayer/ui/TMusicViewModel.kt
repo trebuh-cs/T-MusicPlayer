@@ -1,8 +1,10 @@
 package dev.trebuh.tmusicplayer.ui
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import dev.trebuh.tmusicplayer.data.api.AutoPlaylistConfigDto
 import dev.trebuh.tmusicplayer.data.api.ServerHealthResponse
 import dev.trebuh.tmusicplayer.data.api.TMusicApiClient
 import dev.trebuh.tmusicplayer.data.db.PlaylistSummary
@@ -51,8 +53,11 @@ class TMusicViewModel(application: Application) : AndroidViewModel(application) 
 
     val playerState: StateFlow<PlayerUiState> = playerController.state
     val isSyncing: StateFlow<Boolean> = repository.isSyncing
+    val uploadProgress: StateFlow<String?> = repository.uploadProgress
     val downloadProgress: StateFlow<Map<String, Float>> = repository.downloadProgress
     val syncMessage: StateFlow<String?> = repository.syncMessage
+
+    private var lastResumeSyncMs: Long = 0L
 
     private val _offlineBytes = MutableStateFlow(0L)
     val offlineBytes: StateFlow<Long> = _offlineBytes.asStateFlow()
@@ -130,13 +135,42 @@ class TMusicViewModel(application: Application) : AndroidViewModel(application) 
 
     fun syncNow() {
         viewModelScope.launch {
-            repository.syncNow()
+            repository.syncNow(silent = false)
+            _offlineBytes.value = repository.getOfflineStorageBytes()
+        }
+    }
+
+    fun onAppResumed() {
+        if (!settings.value.isLoggedIn) return
+        val now = System.currentTimeMillis()
+        if (now - lastResumeSyncMs < 45_000L) return
+        lastResumeSyncMs = now
+        repository.scheduleAutoSync(delayMs = 500L)
+    }
+
+    fun uploadTracks(uris: List<Uri>) {
+        viewModelScope.launch {
+            repository.uploadAudioUris(uris)
             _offlineBytes.value = repository.getOfflineStorageBytes()
         }
     }
 
     fun clearSyncMessage() {
         repository.clearSyncMessage()
+    }
+
+    fun playAutoMix(specificTrack: TrackEntity? = null) {
+        playerController.startAutoMix(tracks.value, specificTrack)
+    }
+
+    fun setTrackAutoExcluded(trackId: String, excluded: Boolean) {
+        viewModelScope.launch {
+            repository.setTrackAutoExcluded(trackId, excluded)
+        }
+    }
+
+    fun saveAutoPlaylistConfig(config: AutoPlaylistConfigDto) {
+        repository.saveAutoPlaylistConfig(config)
     }
 
     fun toggleFavorite(trackId: String) {
@@ -198,6 +232,12 @@ class TMusicViewModel(application: Application) : AndroidViewModel(application) 
     fun removeTrackFromPlaylist(playlistId: String, trackId: String) {
         viewModelScope.launch {
             repository.removeTrackFromPlaylist(playlistId, trackId)
+        }
+    }
+
+    fun reorderPlaylistTracks(playlistId: String, orderedTrackIds: List<String>) {
+        viewModelScope.launch {
+            repository.reorderPlaylistTracks(playlistId, orderedTrackIds)
         }
     }
 

@@ -7,8 +7,8 @@ use std::sync::Mutex;
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use t_music_core::models::{
-    MusicFolder, Playlist, RadioStation, ScannedTrack, ServerTrack, SyncFavoritePayload,
-    SyncPlaylistPayload, SyncTrackEditPayload, Track,
+    AutoPlaylistConfig, MusicFolder, Playlist, RadioStation, ScannedTrack, ServerTrack,
+    SyncFavoritePayload, SyncPlaylistPayload, SyncTrackEditPayload, SyncTrackStatsPayload, Track,
 };
 use t_music_core::scanner::ExtractedCover;
 use uuid::Uuid;
@@ -31,6 +31,12 @@ pub struct LocalTrackSyncRow {
     pub trim_start_ms: u64,
     pub trim_end_ms: Option<u64>,
     pub edit_updated_at: i64,
+    pub play_count: u64,
+    pub manual_play_count: u64,
+    pub skip_count: u64,
+    pub auto_excluded: bool,
+    pub last_played_at: i64,
+    pub stats_updated_at: i64,
 }
 
 /// Local playlist snapshot mapped to server track IDs for sync push.
@@ -186,6 +192,11 @@ impl Database {
             "ALTER TABLE tracks ADD COLUMN trim_start_ms INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE tracks ADD COLUMN trim_end_ms INTEGER",
             "ALTER TABLE tracks ADD COLUMN edit_updated_at INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE tracks ADD COLUMN manual_play_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE tracks ADD COLUMN skip_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE tracks ADD COLUMN auto_excluded INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE tracks ADD COLUMN last_played_at INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE tracks ADD COLUMN stats_updated_at INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE playlists ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE playlists ADD COLUMN is_shared INTEGER NOT NULL DEFAULT 0",
         ] {
@@ -509,23 +520,126 @@ impl Database {
         Ok(fav != 0)
     }
 
-    /// Increments `play_count` for a track and returns the new play count.
-    pub fn record_play(&self, track_id: &str) -> Result<u64, String> {
+    /// Increments `play_count` (and `manual_play_count` when user-selected) and returns the updated `Track`.
+    pub fn record_play(&self, track_id: &str, is_manual: bool) -> Result<Track, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let now = Utc::now().timestamp();
         conn.execute(
-            "UPDATE tracks SET play_count = play_count + 1 WHERE id = ?1",
-            params![track_id],
+            "UPDATE tracks
+             SET play_count = play_count + 1,
+                 manual_play_count = manual_play_count + ?1,
+                 last_played_at = ?2,
+                 stats_updated_at = MAX(stats_updated_at + 1, ?2)
+             WHERE id = ?3",
+            params![if is_manual { 1 } else { 0 }, now, track_id],
         )
         .map_err(|e| e.to_string())?;
 
-        let count: i64 = conn
-            .query_row(
-                "SELECT play_count FROM tracks WHERE id = ?1",
-                params![track_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| e.to_string())?;
-        Ok(count as u64)
+        conn.query_row(
+            &format!("SELECT {TRACK_SELECT_COLUMNS} FROM tracks t WHERE t.id = ?1"),
+            params![track_id],
+            map_track_row,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// Increments `skip_count` for a track (when skipped manually early) and returns the updated `Track`.
+    pub fn record_skip(&self, track_id: &str) -> Result<Track, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let now = Utc::now().timestamp();
+        conn.execute(
+            "UPDATE tracks
+             SET skip_count = skip_count + 1,
+                 stats_updated_at = MAX(stats_updated_at + 1, ?1)
+             WHERE id = ?2",
+            params![now, track_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        conn.query_row(
+            &format!("SELECT {TRACK_SELECT_COLUMNS} FROM tracks t WHERE t.id = ?1"),
+            params![track_id],
+            map_track_row,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// Sets or clears whether a track is excluded from the weighted Auto Playlist.
+    pub fn set_track_auto_excluded(&self, track_id: &str, excluded: bool) -> Result<Track, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let now = Utc::now().timestamp();
+        conn.execute(
+            "UPDATE tracks
+             SET auto_excluded = ?1,
+                 stats_updated_at = MAX(stats_updated_at + 1, ?2)
+             WHERE id = ?3",
+            params![if excluded { 1 } else { 0 }, now, track_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        conn.query_row(
+            &format!("SELECT {TRACK_SELECT_COLUMNS} FROM tracks t WHERE t.id = ?1"),
+            params![track_id],
+            map_track_row,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    /// Reads the synced Auto Playlist configuration from local settings.
+    pub fn get_auto_playlist_config(&self) -> Result<AutoPlaylistConfig, String> {
+        let raw = self.get_setting("auto_playlist_config")?;
+        let Some(json_str) = raw else {
+            return Ok(AutoPlaylistConfig::default());
+        };
+        serde_json::from_str::<AutoPlaylistConfig>(&json_str)
+            .map(|mut c| {
+                c.favorite_boost_factor = c.favorite_boost_factor.clamp(1.5, 10.0);
+                c.cooldown_tracks = c.cooldown_tracks.clamp(10, 50);
+                c
+            })
+            .or_else(|_| Ok(AutoPlaylistConfig::default()))
+    }
+
+    /// Persists updated Auto Playlist configuration locally with a strictly monotonic timestamp.
+    pub fn save_auto_playlist_config(
+        &self,
+        config: &AutoPlaylistConfig,
+    ) -> Result<AutoPlaylistConfig, String> {
+        let prev = self.get_auto_playlist_config().unwrap_or_default();
+        let now = Utc::now().timestamp();
+        let clean = AutoPlaylistConfig {
+            max_duration_ms: config.max_duration_ms.filter(|&v| v > 0),
+            favorite_boost_enabled: config.favorite_boost_enabled,
+            favorite_boost_factor: config.favorite_boost_factor.clamp(1.5, 10.0),
+            cooldown_enabled: config.cooldown_enabled,
+            cooldown_tracks: config.cooldown_tracks.clamp(10, 50),
+            updated_at: now.max(prev.updated_at + 1),
+        };
+        let encoded = serde_json::to_string(&clean).map_err(|e| e.to_string())?;
+        self.save_setting("auto_playlist_config", &encoded)?;
+        Ok(clean)
+    }
+
+    /// Applies remote Auto Playlist config pulled from the home server using last-write-wins.
+    pub fn apply_remote_auto_playlist_config(
+        &self,
+        remote: &AutoPlaylistConfig,
+    ) -> Result<bool, String> {
+        let prev = self.get_auto_playlist_config().unwrap_or_default();
+        if remote.updated_at < prev.updated_at {
+            return Ok(false);
+        }
+        let clean = AutoPlaylistConfig {
+            max_duration_ms: remote.max_duration_ms.filter(|&v| v > 0),
+            favorite_boost_enabled: remote.favorite_boost_enabled,
+            favorite_boost_factor: remote.favorite_boost_factor.clamp(1.5, 10.0),
+            cooldown_enabled: remote.cooldown_enabled,
+            cooldown_tracks: remote.cooldown_tracks.clamp(10, 50),
+            updated_at: remote.updated_at,
+        };
+        let encoded = serde_json::to_string(&clean).map_err(|e| e.to_string())?;
+        self.save_setting("auto_playlist_config", &encoded)?;
+        Ok(true)
     }
 
     /// Creates a new playlist and returns its summary row.
@@ -854,14 +968,15 @@ impl Database {
         Ok(())
     }
 
-    /// Lists all tracks with fields needed for sync hashing/uploads/favorites/edits.
+    /// Lists all tracks with fields needed for sync hashing/uploads/favorites/edits/stats.
     pub fn list_tracks_for_sync(&self) -> Result<Vec<LocalTrackSyncRow>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, file_path, title, artist, album, content_hash,
                         server_track_id, is_remote, is_favorite, favorite_updated_at,
-                        edit_speed, edit_gain_db, trim_start_ms, trim_end_ms, edit_updated_at
+                        edit_speed, edit_gain_db, trim_start_ms, trim_end_ms, edit_updated_at,
+                        play_count, manual_play_count, skip_count, auto_excluded, last_played_at, stats_updated_at
                  FROM tracks",
             )
             .map_err(|e| e.to_string())?;
@@ -883,6 +998,12 @@ impl Database {
                 trim_start_ms: row.get::<_, i64>(12)?.max(0) as u64,
                 trim_end_ms: row.get::<_, Option<i64>>(13)?.map(|v| v.max(0) as u64),
                 edit_updated_at: row.get(14)?,
+                play_count: row.get::<_, i64>(15)?.max(0) as u64,
+                manual_play_count: row.get::<_, i64>(16)?.max(0) as u64,
+                skip_count: row.get::<_, i64>(17)?.max(0) as u64,
+                auto_excluded: row.get::<_, i64>(18)? != 0,
+                last_played_at: row.get(19)?,
+                stats_updated_at: row.get(20)?,
             })
         })
     }
@@ -1256,6 +1377,52 @@ impl Database {
         Ok(true)
     }
 
+    /// Merges remote playback stats (monotonic counters + LWW `auto_excluded`) pulled from the server.
+    pub fn apply_remote_track_stats_sync(&self, stats: &SyncTrackStatsPayload) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let existing: Option<(String, i64, i64, i64, i64, i64, i64)> = conn
+            .query_row(
+                "SELECT id, play_count, manual_play_count, skip_count, auto_excluded, last_played_at, stats_updated_at
+                 FROM tracks WHERE server_track_id = ?1",
+                params![stats.track_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+
+        let Some((local_id, ex_play, ex_manual, ex_skip, ex_excl, ex_last, ex_ts)) = existing else {
+            return Ok(false);
+        };
+
+        let next_excl = if stats.updated_at >= ex_ts {
+            if stats.auto_excluded { 1 } else { 0 }
+        } else {
+            ex_excl
+        };
+
+        conn.execute(
+            "UPDATE tracks
+             SET play_count = ?1,
+                 manual_play_count = ?2,
+                 skip_count = ?3,
+                 auto_excluded = ?4,
+                 last_played_at = ?5,
+                 stats_updated_at = ?6
+             WHERE id = ?7",
+            params![
+                ex_play.max(stats.play_count as i64),
+                ex_manual.max(stats.manual_play_count as i64),
+                ex_skip.max(stats.skip_count as i64),
+                next_excl,
+                ex_last.max(stats.last_played_at),
+                ex_ts.max(stats.updated_at),
+                local_id,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
     /// Looks up path/format/server info needed to export a track as MP3.
     pub fn get_track_export_info(
         &self,
@@ -1283,7 +1450,8 @@ const TRACK_SELECT_COLUMNS: &str = "
     t.id, t.file_path, t.title, t.artist, t.album, t.album_artist,
     t.track_number, t.disc_number, t.year, t.genre, t.duration_ms,
     t.format, t.bitrate_kbps, t.file_size, t.modified_at, t.cover_hash,
-    t.play_count, t.is_favorite, t.added_at,
+    t.play_count, t.manual_play_count, t.skip_count, t.auto_excluded, t.last_played_at,
+    t.is_favorite, t.added_at,
     t.edit_speed, t.edit_gain_db, t.trim_start_ms, t.trim_end_ms
 ";
 
@@ -1306,12 +1474,16 @@ fn map_track_row(row: &Row<'_>) -> rusqlite::Result<Track> {
         modified_at: row.get(14)?,
         cover_hash: row.get(15)?,
         play_count: row.get::<_, i64>(16)? as u64,
-        is_favorite: row.get::<_, i64>(17)? != 0,
-        added_at: row.get(18)?,
-        edit_speed: row.get::<_, f64>(19)? as f32,
-        edit_gain_db: row.get::<_, f64>(20)? as f32,
-        trim_start_ms: row.get::<_, i64>(21)?.max(0) as u64,
-        trim_end_ms: row.get::<_, Option<i64>>(22)?.map(|v| v.max(0) as u64),
+        manual_play_count: row.get::<_, i64>(17)?.max(0) as u64,
+        skip_count: row.get::<_, i64>(18)?.max(0) as u64,
+        auto_excluded: row.get::<_, i64>(19)? != 0,
+        last_played_at: row.get(20)?,
+        is_favorite: row.get::<_, i64>(21)? != 0,
+        added_at: row.get(22)?,
+        edit_speed: row.get::<_, f64>(23)? as f32,
+        edit_gain_db: row.get::<_, f64>(24)? as f32,
+        trim_start_ms: row.get::<_, i64>(25)?.max(0) as u64,
+        trim_end_ms: row.get::<_, Option<i64>>(26)?.map(|v| v.max(0) as u64),
     })
 }
 
@@ -1502,7 +1674,26 @@ mod tests {
         );
 
         assert!(db.toggle_favorite(&id1).unwrap());
-        assert_eq!(db.record_play(&id1).unwrap(), 1);
+        let played = db.record_play(&id1, true).unwrap();
+        assert_eq!(played.play_count, 1);
+        assert_eq!(played.manual_play_count, 1);
+        let skipped = db.record_skip(&id1).unwrap();
+        assert_eq!(skipped.skip_count, 1);
+        let excluded = db.set_track_auto_excluded(&id1, true).unwrap();
+        assert!(excluded.auto_excluded);
+
+        let cfg = AutoPlaylistConfig {
+            max_duration_ms: Some(420_000),
+            favorite_boost_enabled: true,
+            favorite_boost_factor: 5.5,
+            cooldown_enabled: true,
+            cooldown_tracks: 10,
+            updated_at: 0,
+        };
+        let saved_cfg = db.save_auto_playlist_config(&cfg).unwrap();
+        assert_eq!(saved_cfg.max_duration_ms, Some(420_000));
+        assert!((saved_cfg.favorite_boost_factor - 5.5).abs() < 0.01);
+        assert!(saved_cfg.updated_at > 0);
     }
 
     #[test]

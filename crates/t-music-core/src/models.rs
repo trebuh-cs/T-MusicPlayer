@@ -8,6 +8,18 @@ fn default_edit_speed() -> f32 {
     1.0
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_favorite_boost_factor() -> f32 {
+    3.0
+}
+
+fn default_cooldown_tracks() -> u32 {
+    10
+}
+
 /// A locally indexed or synced audio track.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Track {
@@ -28,6 +40,14 @@ pub struct Track {
     pub modified_at: i64,
     pub cover_hash: Option<String>,
     pub play_count: u64,
+    #[serde(default)]
+    pub manual_play_count: u64,
+    #[serde(default)]
+    pub skip_count: u64,
+    #[serde(default)]
+    pub auto_excluded: bool,
+    #[serde(default)]
+    pub last_played_at: i64,
     pub is_favorite: bool,
     pub added_at: i64,
     #[serde(default = "default_edit_speed")]
@@ -220,6 +240,54 @@ pub struct SyncTrackEditPayload {
     pub updated_at: i64,
 }
 
+/// Per-user playback counters and Auto Playlist exclusion state synced across devices.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncTrackStatsPayload {
+    pub track_id: String,
+    #[serde(default)]
+    pub play_count: u64,
+    #[serde(default)]
+    pub manual_play_count: u64,
+    #[serde(default)]
+    pub skip_count: u64,
+    #[serde(default)]
+    pub auto_excluded: bool,
+    #[serde(default)]
+    pub last_played_at: i64,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+/// Per-user Auto Playlist weighting & cooldown preferences synced across PC & Android.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AutoPlaylistConfig {
+    #[serde(default)]
+    pub max_duration_ms: Option<u64>,
+    #[serde(default = "default_true")]
+    pub favorite_boost_enabled: bool,
+    #[serde(default = "default_favorite_boost_factor")]
+    pub favorite_boost_factor: f32,
+    #[serde(default = "default_true")]
+    pub cooldown_enabled: bool,
+    #[serde(default = "default_cooldown_tracks")]
+    pub cooldown_tracks: u32,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+impl Default for AutoPlaylistConfig {
+    fn default() -> Self {
+        Self {
+            max_duration_ms: None,
+            favorite_boost_enabled: true,
+            favorite_boost_factor: 3.0,
+            cooldown_enabled: true,
+            cooldown_tracks: 10,
+            updated_at: 0,
+        }
+    }
+}
+
 /// Response returned by `GET /api/v1/sync/pull`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SyncPullResponse {
@@ -229,6 +297,10 @@ pub struct SyncPullResponse {
     pub favorites: Vec<SyncFavoritePayload>,
     #[serde(default)]
     pub track_edits: Vec<SyncTrackEditPayload>,
+    #[serde(default)]
+    pub track_stats: Vec<SyncTrackStatsPayload>,
+    #[serde(default)]
+    pub auto_playlist_config: Option<AutoPlaylistConfig>,
 }
 
 /// Request sent to `POST /api/v1/sync/push`.
@@ -238,6 +310,10 @@ pub struct SyncPushRequest {
     pub favorites: Vec<SyncFavoritePayload>,
     #[serde(default)]
     pub track_edits: Vec<SyncTrackEditPayload>,
+    #[serde(default)]
+    pub track_stats: Vec<SyncTrackStatsPayload>,
+    #[serde(default)]
+    pub auto_playlist_config: Option<AutoPlaylistConfig>,
 }
 
 /// Response returned by `POST /api/v1/sync/push`.
@@ -248,6 +324,8 @@ pub struct SyncPushResponse {
     pub applied_favorites: usize,
     #[serde(default)]
     pub applied_track_edits: usize,
+    #[serde(default)]
+    pub applied_track_stats: usize,
 }
 
 /// Request sent to `POST /api/v1/tracks/check-hashes` to avoid redundant uploads.

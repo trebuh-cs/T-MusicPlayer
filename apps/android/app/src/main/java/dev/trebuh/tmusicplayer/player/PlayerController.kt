@@ -38,6 +38,7 @@ data class PlayerUiState(
     val repeatMode: Int = Player.REPEAT_MODE_OFF,
     val playbackRate: Float = 1.0f,
     val isBuffering: Boolean = false,
+    val isAutoMixActive: Boolean = false,
 )
 
 class PlayerController(
@@ -56,6 +57,9 @@ class PlayerController(
     val state: StateFlow<PlayerUiState> = _state.asStateFlow()
 
     private var currentQueue: List<TrackEntity> = emptyList()
+    private var latestAllTracks: List<TrackEntity> = emptyList()
+    private var isAutoMixMode: Boolean = false
+    private var suppressAutoNextRecord: Boolean = false
 
     private val listener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -65,11 +69,25 @@ class PlayerController(
 
         override fun onPlaybackStateChanged(playbackState: Int) {
             syncStateFromPlayer()
+            if (playbackState == Player.STATE_ENDED && isAutoMixMode) {
+                advanceAutoMix(isManualSkip = false)
+            }
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             val activeTrack = resolveActiveTrack()
             applyPerTrackOverrides(controller, activeTrack)
+            if (activeTrack != null) {
+                val manual = if (suppressAutoNextRecord) {
+                    suppressAutoNextRecord = false
+                    true
+                } else {
+                    reason == Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED
+                }
+                scope.launch {
+                    repository.recordPlay(activeTrack.id, isManual = manual)
+                }
+            }
             syncStateFromPlayer()
         }
 
@@ -135,42 +153,51 @@ class PlayerController(
         }
     }
 
+    private fun buildMediaItem(
+        track: TrackEntity,
+        serverUrl: String,
+        token: String,
+        quality: String,
+    ): MediaItem? {
+        val uri = resolvePlayableUri(track, serverUrl, token, quality) ?: return null
+        val artworkUri = resolveArtworkUri(track, serverUrl)
+        val metadata = MediaMetadata.Builder()
+            .setTitle(track.title)
+            .setArtist(track.artist)
+            .setAlbumTitle(track.album)
+            .apply {
+                if (artworkUri != null) setArtworkUri(artworkUri)
+            }
+            .build()
+        val builder = MediaItem.Builder()
+            .setMediaId(track.id)
+            .setUri(uri)
+            .setMediaMetadata(metadata)
+
+        val startMs = track.trimStartMs.coerceAtLeast(0L)
+        val endMs = track.trimEndMs
+        if (startMs > 0L || (endMs != null && endMs > startMs)) {
+            val clip = MediaItem.ClippingConfiguration.Builder()
+                .setStartPositionMs(startMs)
+            if (endMs != null && endMs > startMs) {
+                clip.setEndPositionMs(endMs)
+            }
+            builder.setClippingConfiguration(clip.build())
+        }
+        return builder.build()
+    }
+
     fun playQueue(tracks: List<TrackEntity>, startIndex: Int = 0) {
         if (tracks.isEmpty()) return
+        isAutoMixMode = false
+        suppressAutoNextRecord = true
         val safeIndex = startIndex.coerceIn(0, tracks.lastIndex)
         scope.launch {
             val ctrl = ensureController() ?: return@launch
             val settings = repository.settings.value
             val playableItems = tracks.mapNotNull { track ->
-                val uri = resolvePlayableUri(track, settings.serverUrl, settings.authToken, settings.audioQuality)
-                    ?: return@mapNotNull null
-                val artworkUri = resolveArtworkUri(track, settings.serverUrl)
-                val metadata = MediaMetadata.Builder()
-                    .setTitle(track.title)
-                    .setArtist(track.artist)
-                    .setAlbumTitle(track.album)
-                    .apply {
-                        if (artworkUri != null) setArtworkUri(artworkUri)
-                    }
-                    .build()
-                val builder = MediaItem.Builder()
-                    .setMediaId(track.id)
-                    .setUri(uri)
-                    .setMediaMetadata(metadata)
-
-                // Non-destructive front/end trim applied directly in Media3 ExoPlayer pipeline.
-                val startMs = track.trimStartMs.coerceAtLeast(0L)
-                val endMs = track.trimEndMs
-                if (startMs > 0L || (endMs != null && endMs > startMs)) {
-                    val clip = MediaItem.ClippingConfiguration.Builder()
-                        .setStartPositionMs(startMs)
-                    if (endMs != null && endMs > startMs) {
-                        clip.setEndPositionMs(endMs)
-                    }
-                    builder.setClippingConfiguration(clip.build())
-                }
-
-                builder.build() to track
+                buildMediaItem(track, settings.serverUrl, settings.authToken, settings.audioQuality)
+                    ?.let { it to track }
             }
 
             if (playableItems.isEmpty()) return@launch
@@ -186,6 +213,86 @@ class PlayerController(
         }
     }
 
+    fun startAutoMix(allTracks: List<TrackEntity>, specificTrack: TrackEntity? = null) {
+        latestAllTracks = allTracks
+        val settings = repository.settings.value
+        val config = settings.toAutoPlaylistConfigDto()
+        val currentId = resolveActiveTrack()?.id
+        val picked = specificTrack
+            ?: AutoPlaylistEngine.pickNextTrack(allTracks, config, settings.recentPlayIds, currentId)
+            ?: return
+
+        isAutoMixMode = true
+        suppressAutoNextRecord = false
+        scope.launch {
+            val ctrl = ensureController() ?: return@launch
+            val item = buildMediaItem(
+                picked,
+                settings.serverUrl,
+                settings.authToken,
+                settings.audioQuality,
+            ) ?: return@launch
+            val updatedQueue = (currentQueue.filter { it.id != picked.id } + picked).takeLast(30)
+            currentQueue = updatedQueue
+            val targetIdx = (updatedQueue.size - 1).coerceAtLeast(0)
+            ctrl.setMediaItem(item, 0L)
+            // Keep clean single item active in ExoPlayer while currentQueue retains history for UI.
+            currentQueue = listOf(picked)
+            applyPerTrackOverrides(ctrl, picked)
+            ctrl.prepare()
+            ctrl.play()
+            syncStateFromPlayer()
+        }
+    }
+
+    private fun advanceAutoMix(isManualSkip: Boolean) {
+        val current = resolveActiveTrack()
+        if (isManualSkip && current != null) {
+            recordSkipIfEarly(current)
+        }
+        val settings = repository.settings.value
+        val config = settings.toAutoPlaylistConfigDto()
+        val pool = latestAllTracks.ifEmpty { currentQueue }
+        val picked = AutoPlaylistEngine.pickNextTrack(
+            tracks = pool,
+            config = config,
+            recentPlayIds = settings.recentPlayIds,
+            currentTrackId = current?.id,
+        ) ?: return
+
+        suppressAutoNextRecord = false
+        scope.launch {
+            val ctrl = ensureController() ?: return@launch
+            val item = buildMediaItem(
+                picked,
+                settings.serverUrl,
+                settings.authToken,
+                settings.audioQuality,
+            ) ?: return@launch
+            currentQueue = listOf(picked)
+            ctrl.setMediaItem(item, 0L)
+            applyPerTrackOverrides(ctrl, picked)
+            ctrl.prepare()
+            ctrl.play()
+            syncStateFromPlayer()
+        }
+    }
+
+    private fun recordSkipIfEarly(track: TrackEntity) {
+        val ctrl = controller ?: return
+        val startMs = track.trimStartMs.coerceAtLeast(0L)
+        val rawDurMs = track.trimEndMs?.takeIf { it > startMs }?.let { it - startMs }
+            ?: ctrl.duration.takeIf { it > 0L }
+            ?: track.durationMs
+        val elapsedMs = (ctrl.currentPosition - startMs).coerceAtLeast(0L)
+        val thresholdMs = minOf(30_000L, (rawDurMs * 0.5).toLong()).coerceAtLeast(2_000L)
+        if (elapsedMs < thresholdMs) {
+            scope.launch {
+                repository.recordSkip(track.id)
+            }
+        }
+    }
+
     fun togglePlayPause() {
         val ctrl = controller ?: return
         if (ctrl.isPlaying) {
@@ -196,6 +303,14 @@ class PlayerController(
     }
 
     fun next() {
+        val active = resolveActiveTrack()
+        if (isAutoMixMode) {
+            advanceAutoMix(isManualSkip = true)
+            return
+        }
+        if (active != null) {
+            recordSkipIfEarly(active)
+        }
         controller?.seekToNextMediaItem()
     }
 
@@ -238,6 +353,7 @@ class PlayerController(
     }
 
     fun refreshTrackMetadata(updatedTracks: List<TrackEntity>) {
+        latestAllTracks = updatedTracks
         if (currentQueue.isEmpty()) return
         val byId = updatedTracks.associateBy { it.id }
         currentQueue = currentQueue.map { byId[it.id] ?: it }
@@ -246,6 +362,7 @@ class PlayerController(
     }
 
     fun stopAndClear() {
+        isAutoMixMode = false
         controller?.stop()
         controller?.clearMediaItems()
         currentQueue = emptyList()
@@ -315,6 +432,7 @@ class PlayerController(
                 repeatMode = ctrl?.repeatMode ?: Player.REPEAT_MODE_OFF,
                 playbackRate = repository.settings.value.playbackRate,
                 isBuffering = ctrl?.playbackState == Player.STATE_BUFFERING,
+                isAutoMixActive = isAutoMixMode,
             )
         }
     }

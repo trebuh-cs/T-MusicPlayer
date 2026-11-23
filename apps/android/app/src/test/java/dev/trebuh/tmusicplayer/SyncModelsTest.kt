@@ -65,7 +65,26 @@ class SyncModelsTest {
                   "trim_end_ms": 180000,
                   "updated_at": 1763809600
                 }
-              ]
+              ],
+              "track_stats": [
+                {
+                  "track_id": "track-1",
+                  "play_count": 7,
+                  "manual_play_count": 4,
+                  "skip_count": 1,
+                  "auto_excluded": false,
+                  "last_played_at": 1763809700,
+                  "updated_at": 1763809700
+                }
+              ],
+              "auto_playlist_config": {
+                "max_duration_ms": 480000,
+                "favorite_boost_enabled": true,
+                "favorite_boost_factor": 4.5,
+                "cooldown_enabled": true,
+                "cooldown_tracks": 10,
+                "updated_at": 1763809800
+              }
             }
         """.trimIndent()
 
@@ -80,6 +99,12 @@ class SyncModelsTest {
         assertEquals(4.0f, parsed.trackEdits[0].gainDb, 0.001f)
         assertEquals(2500L, parsed.trackEdits[0].trimStartMs)
         assertEquals(180000L, parsed.trackEdits[0].trimEndMs)
+        assertEquals(1, parsed.trackStats.size)
+        assertEquals(7L, parsed.trackStats[0].playCount)
+        assertEquals(4L, parsed.trackStats[0].manualPlayCount)
+        assertEquals(1L, parsed.trackStats[0].skipCount)
+        assertEquals(480000L, parsed.autoPlaylistConfig?.maxDurationMs)
+        assertEquals(4.5f, parsed.autoPlaylistConfig?.favoriteBoostFactor ?: 0f, 0.001f)
     }
 
     @Test

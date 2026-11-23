@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.AlertDialog
@@ -49,6 +50,7 @@ import androidx.core.content.ContextCompat
 import dev.trebuh.tmusicplayer.ui.TMusicViewModel
 import dev.trebuh.tmusicplayer.ui.components.MiniPlayerBar
 import dev.trebuh.tmusicplayer.ui.components.NowPlayingSheet
+import dev.trebuh.tmusicplayer.ui.screens.AutoPlaylistScreen
 import dev.trebuh.tmusicplayer.ui.screens.LibraryScreen
 import dev.trebuh.tmusicplayer.ui.screens.LoginScreen
 import dev.trebuh.tmusicplayer.ui.screens.PlaylistDetailScreen
@@ -59,6 +61,7 @@ import dev.trebuh.tmusicplayer.ui.theme.TMusicTheme
 
 private enum class MainTab(val label: String) {
     LIBRARY("Library"),
+    AUTO_MIX("Auto Mix"),
     PLAYLISTS("Playlists"),
     SETTINGS("Settings"),
 }
@@ -122,6 +125,11 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onResume() {
+        super.onResume()
+        viewModel.onAppResumed()
+    }
 }
 
 @Composable
@@ -132,6 +140,7 @@ private fun MainAppShell(viewModel: TMusicViewModel) {
     val settings by viewModel.settings.collectAsState()
     val playerState by viewModel.playerState.collectAsState()
     val isSyncing by viewModel.isSyncing.collectAsState()
+    val uploadProgress by viewModel.uploadProgress.collectAsState()
     val downloadProgress by viewModel.downloadProgress.collectAsState()
     val syncMessage by viewModel.syncMessage.collectAsState()
     val offlineBytes by viewModel.offlineBytes.collectAsState()
@@ -171,6 +180,22 @@ private fun MainAppShell(viewModel: TMusicViewModel) {
                         },
                         icon = { Icon(Icons.Rounded.LibraryMusic, contentDescription = null) },
                         label = { Text(MainTab.LIBRARY.label) },
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = palette.accent,
+                            selectedTextColor = palette.accent,
+                            indicatorColor = palette.accentSoft,
+                            unselectedIconColor = palette.textSecondary,
+                            unselectedTextColor = palette.textSecondary,
+                        ),
+                    )
+                    NavigationBarItem(
+                        selected = currentTab == MainTab.AUTO_MIX,
+                        onClick = {
+                            selectedPlaylistId = null
+                            currentTab = MainTab.AUTO_MIX
+                        },
+                        icon = { Icon(Icons.Rounded.AutoAwesome, contentDescription = null) },
+                        label = { Text(MainTab.AUTO_MIX.label) },
                         colors = NavigationBarItemDefaults.colors(
                             selectedIconColor = palette.accent,
                             selectedTextColor = palette.accent,
@@ -223,16 +248,33 @@ private fun MainAppShell(viewModel: TMusicViewModel) {
                     playlists = playlists,
                     currentTrackId = playerState.currentTrack?.id,
                     isSyncing = isSyncing,
+                    uploadProgress = uploadProgress,
                     syncMessage = syncMessage,
                     downloadProgress = downloadProgress,
                     artworkModel = viewModel.repository::resolveArtworkModel,
                     onSyncNow = viewModel::syncNow,
+                    onUploadAudioUris = viewModel::uploadTracks,
                     onDismissSyncMessage = viewModel::clearSyncMessage,
                     onPlayQueue = viewModel::playTracks,
                     onToggleFavorite = viewModel::toggleFavorite,
                     onDownloadOffline = viewModel::downloadTrackOffline,
                     onRemoveOffline = viewModel::removeOfflineTrack,
                     onAddTrackToPlaylist = viewModel::addTrackToPlaylist,
+                )
+
+                MainTab.AUTO_MIX -> AutoPlaylistScreen(
+                    tracks = tracks,
+                    config = settings.toAutoPlaylistConfigDto(),
+                    recentPlayIds = settings.recentPlayIds,
+                    currentTrackId = playerState.currentTrack?.id,
+                    isAutoMixActive = playerState.isAutoMixActive,
+                    isSyncing = isSyncing,
+                    artworkModel = viewModel.repository::resolveArtworkModel,
+                    onSyncNow = viewModel::syncNow,
+                    onStartAutoMix = viewModel::playAutoMix,
+                    onSaveConfig = viewModel::saveAutoPlaylistConfig,
+                    onToggleExcluded = viewModel::setTrackAutoExcluded,
+                    onToggleFavorite = viewModel::toggleFavorite,
                 )
 
                 MainTab.PLAYLISTS -> {
@@ -261,6 +303,9 @@ private fun MainAppShell(viewModel: TMusicViewModel) {
                             },
                             onRemoveTrackFromPlaylist = { trackId ->
                                 viewModel.removeTrackFromPlaylist(selectedPlaylist.id, trackId)
+                            },
+                            onReorderTracks = { orderedIds ->
+                                viewModel.reorderPlaylistTracks(selectedPlaylist.id, orderedIds)
                             },
                         )
                     } else {
@@ -313,6 +358,9 @@ private fun MainAppShell(viewModel: TMusicViewModel) {
             onDownloadOffline = { viewModel.downloadTrackOffline(activeTrack.id) },
             onRemoveOffline = { viewModel.removeOfflineTrack(activeTrack.id) },
             onAddToPlaylist = { playlistPickerTrackId = activeTrack.id },
+            onToggleAutoExcluded = {
+                viewModel.setTrackAutoExcluded(activeTrack.id, !activeTrack.autoExcluded)
+            },
             onSetPlaybackRate = viewModel::setPlaybackRate,
         )
     }

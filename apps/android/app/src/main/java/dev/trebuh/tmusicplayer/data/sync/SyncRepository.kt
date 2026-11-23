@@ -1,12 +1,15 @@
 package dev.trebuh.tmusicplayer.data.sync
 
 import android.content.Context
+import android.net.Uri
 import dev.trebuh.tmusicplayer.data.api.AuthResponseDto
+import dev.trebuh.tmusicplayer.data.api.AutoPlaylistConfigDto
 import dev.trebuh.tmusicplayer.data.api.ServerHealthResponse
 import dev.trebuh.tmusicplayer.data.api.SyncFavoriteDto
 import dev.trebuh.tmusicplayer.data.api.SyncPlaylistDto
 import dev.trebuh.tmusicplayer.data.api.SyncPushRequestDto
 import dev.trebuh.tmusicplayer.data.api.SyncTrackEditDto
+import dev.trebuh.tmusicplayer.data.api.SyncTrackStatsDto
 import dev.trebuh.tmusicplayer.data.api.TMusicApiClient
 import dev.trebuh.tmusicplayer.data.db.MusicDao
 import dev.trebuh.tmusicplayer.data.db.PlaylistEntity
@@ -16,7 +19,9 @@ import dev.trebuh.tmusicplayer.data.prefs.AppPreferences
 import dev.trebuh.tmusicplayer.data.prefs.UserSettings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -48,6 +53,7 @@ class SyncRepository(
     private val syncMutex = Mutex()
     private val activeDownloadsMutex = Mutex()
     private val activeDownloads = mutableSetOf<String>()
+    private var autoSyncJob: Job? = null
 
     private val audioDir = File(appContext.filesDir, "offline_audio")
     private val coversDir = File(appContext.filesDir, "offline_covers")
@@ -58,6 +64,9 @@ class SyncRepository(
 
     private val _isSyncing = MutableStateFlow(false)
     val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
+
+    private val _uploadProgress = MutableStateFlow<String?>(null)
+    val uploadProgress: StateFlow<String?> = _uploadProgress.asStateFlow()
 
     private val _downloadProgress = MutableStateFlow<Map<String, Float>>(emptyMap())
     val downloadProgress: StateFlow<Map<String, Float>> = _downloadProgress.asStateFlow()
@@ -70,6 +79,15 @@ class SyncRepository(
 
     fun clearSyncMessage() {
         _syncMessage.value = null
+    }
+
+    fun scheduleAutoSync(delayMs: Long = 2500L) {
+        if (!prefs.settings.value.isLoggedIn) return
+        autoSyncJob?.cancel()
+        autoSyncJob = ioScope.launch {
+            delay(delayMs)
+            syncNow(silent = true)
+        }
     }
 
     suspend fun checkHealth(rawServerUrl: String): Result<ServerHealthResponse> {
@@ -138,7 +156,7 @@ class SyncRepository(
         _syncMessage.value = null
     }
 
-    suspend fun syncNow(): Result<SyncReport> = syncMutex.withLock {
+    suspend fun syncNow(silent: Boolean = false): Result<SyncReport> = syncMutex.withLock {
         val current = prefs.settings.value
         if (!current.isLoggedIn) {
             return Result.failure(IllegalStateException("Not connected to a server."))
@@ -191,9 +209,36 @@ class SyncRepository(
                     )
                 }
 
+            val statsToPush = localTracks
+                .filter {
+                    it.playCount > 0L ||
+                        it.manualPlayCount > 0L ||
+                        it.skipCount > 0L ||
+                        it.autoExcluded ||
+                        it.statsUpdatedAt > 0L
+                }
+                .map { tr ->
+                    SyncTrackStatsDto(
+                        trackId = tr.id,
+                        playCount = tr.playCount,
+                        manualPlayCount = tr.manualPlayCount,
+                        skipCount = tr.skipCount,
+                        autoExcluded = tr.autoExcluded,
+                        lastPlayedAt = tr.lastPlayedAt,
+                        updatedAt = tr.statsUpdatedAt,
+                    )
+                }
+
+            val autoCfgToPush = current.toAutoPlaylistConfigDto().takeIf { it.updatedAt > 0L }
+
             var pushedPlaylists = 0
             var pushedFavorites = 0
-            if (ownedPlaylistsToPush.isNotEmpty() || favoritesToPush.isNotEmpty() || editsToPush.isNotEmpty()) {
+            if (ownedPlaylistsToPush.isNotEmpty() ||
+                favoritesToPush.isNotEmpty() ||
+                editsToPush.isNotEmpty() ||
+                statsToPush.isNotEmpty() ||
+                autoCfgToPush != null
+            ) {
                 val pushRes = api.pushSync(
                     current.serverUrl,
                     current.authToken,
@@ -201,9 +246,13 @@ class SyncRepository(
                         playlists = ownedPlaylistsToPush,
                         favorites = favoritesToPush,
                         trackEdits = editsToPush,
+                        trackStats = statsToPush,
+                        autoPlaylistConfig = autoCfgToPush,
                     ),
                 ).getOrElse { err ->
-                    _syncMessage.value = "Sync failed: ${err.message}"
+                    if (!silent) {
+                        _syncMessage.value = "Sync failed: ${err.message}"
+                    }
                     return Result.failure(err)
                 }
                 pushedPlaylists = pushRes.appliedPlaylists
@@ -211,12 +260,15 @@ class SyncRepository(
             }
 
             val pull = api.pullSync(current.serverUrl, current.authToken).getOrElse { err ->
-                _syncMessage.value = "Sync failed: ${err.message}"
+                if (!silent) {
+                    _syncMessage.value = "Sync failed: ${err.message}"
+                }
                 return Result.failure(err)
             }
 
             val remoteFavByTrackId = pull.favorites.associateBy { it.trackId }
             val remoteEditByTrackId = pull.trackEdits.associateBy { it.trackId }
+            val remoteStatsByTrackId = pull.trackStats.associateBy { it.trackId }
             val pulledTrackIds = pull.tracks.map { it.id }.toSet()
 
             // Remove offline audio for tracks that no longer exist on the server.
@@ -279,6 +331,19 @@ class SyncRepository(
                     else -> 0L
                 }
 
+                val remoteStats = remoteStatsByTrackId[dto.id]
+                val resolvedPlayCount = maxOf(existing?.playCount ?: 0L, remoteStats?.playCount ?: 0L)
+                val resolvedManualCount = maxOf(existing?.manualPlayCount ?: 0L, remoteStats?.manualPlayCount ?: 0L)
+                val resolvedSkipCount = maxOf(existing?.skipCount ?: 0L, remoteStats?.skipCount ?: 0L)
+                val resolvedLastPlayed = maxOf(existing?.lastPlayedAt ?: 0L, remoteStats?.lastPlayedAt ?: 0L)
+                val localStatsTs = existing?.statsUpdatedAt ?: 0L
+                val remoteStatsTs = remoteStats?.updatedAt ?: 0L
+                val resolvedAutoExcluded = when {
+                    remoteStats != null && remoteStatsTs >= localStatsTs -> remoteStats.autoExcluded
+                    else -> existing?.autoExcluded ?: false
+                }
+                val resolvedStatsTs = maxOf(localStatsTs, remoteStatsTs)
+
                 TrackEntity(
                     id = dto.id,
                     contentHash = dto.contentHash,
@@ -304,6 +369,12 @@ class SyncRepository(
                     trimStartMs = resolvedTrimStart,
                     trimEndMs = resolvedTrimEnd,
                     editUpdatedAt = resolvedEditTs,
+                    playCount = resolvedPlayCount,
+                    manualPlayCount = resolvedManualCount,
+                    skipCount = resolvedSkipCount,
+                    autoExcluded = resolvedAutoExcluded,
+                    lastPlayedAt = resolvedLastPlayed,
+                    statsUpdatedAt = resolvedStatsTs,
                     localAudioPath = validLocalAudio,
                     localCoverPath = coverCandidate,
                 )
@@ -354,6 +425,13 @@ class SyncRepository(
                 }
             }
 
+            pull.autoPlaylistConfig?.let { remoteCfg ->
+                val localTs = prefs.settings.value.autoConfigUpdatedAt
+                if (remoteCfg.updatedAt >= localTs) {
+                    prefs.setAutoPlaylistConfig(remoteCfg)
+                }
+            }
+
             val syncTime = pull.serverTime.takeIf { it > 0L } ?: nowEpochSeconds()
             prefs.setLastSyncAt(syncTime)
 
@@ -368,14 +446,55 @@ class SyncRepository(
                 pushedPlaylists = pushedPlaylists,
                 pushedFavorites = pushedFavorites,
             )
-            _syncMessage.value =
-                "Synced ${report.totalTracks} tracks, ${report.totalPlaylists} playlists"
+            if (!silent) {
+                _syncMessage.value =
+                    "Synced ${report.totalTracks} tracks, ${report.totalPlaylists} playlists"
+            }
             Result.success(report)
         } catch (t: Throwable) {
-            _syncMessage.value = "Sync failed: ${t.message ?: "unknown error"}"
+            if (!silent) {
+                _syncMessage.value = "Sync failed: ${t.message ?: "unknown error"}"
+            }
             Result.failure(t)
         } finally {
             _isSyncing.value = false
+        }
+    }
+
+    suspend fun uploadAudioUris(uris: List<Uri>): Result<Int> {
+        val current = prefs.settings.value
+        if (!current.isLoggedIn) {
+            _syncMessage.value = "Sign in to your home server before uploading."
+            return Result.failure(IllegalStateException("Not logged in"))
+        }
+        if (uris.isEmpty()) return Result.success(0)
+
+        var uploadedCount = 0
+        try {
+            for ((idx, uri) in uris.withIndex()) {
+                _uploadProgress.value = "Preparing file ${idx + 1}/${uris.size}…"
+                val res = api.uploadAudioFromUri(
+                    context = appContext,
+                    baseUrl = current.serverUrl,
+                    token = current.authToken,
+                    uri = uri,
+                ) { status ->
+                    _uploadProgress.value = if (uris.size > 1) "[${idx + 1}/${uris.size}] $status" else status
+                }
+                if (res.isSuccess) {
+                    uploadedCount++
+                } else {
+                    val errMsg = res.exceptionOrNull()?.message ?: "Upload failed"
+                    _syncMessage.value = "Upload error: $errMsg"
+                    return Result.failure(res.exceptionOrNull() ?: IllegalStateException(errMsg))
+                }
+            }
+            _uploadProgress.value = "Syncing library…"
+            syncNow(silent = false)
+            _syncMessage.value = "Uploaded $uploadedCount track(s) and synced."
+            return Result.success(uploadedCount)
+        } finally {
+            _uploadProgress.value = null
         }
     }
 
@@ -402,6 +521,35 @@ class SyncRepository(
         val nextFavorite = !track.isFavorite
         val nextTimestamp = maxOf(nowEpochSeconds(), track.favoriteUpdatedAt + 1L)
         dao.updateFavorite(trackId, nextFavorite, nextTimestamp)
+        scheduleAutoSync()
+    }
+
+    suspend fun recordPlay(trackId: String, isManual: Boolean) {
+        prefs.recordRecentPlayId(trackId)
+        dao.recordTrackPlay(trackId, if (isManual) 1L else 0L, nowEpochSeconds())
+        scheduleAutoSync(delayMs = 4000L)
+    }
+
+    suspend fun recordSkip(trackId: String) {
+        dao.recordTrackSkip(trackId, nowEpochSeconds())
+        scheduleAutoSync(delayMs = 4000L)
+    }
+
+    suspend fun setTrackAutoExcluded(trackId: String, excluded: Boolean) {
+        dao.updateTrackAutoExcluded(trackId, excluded, nowEpochSeconds())
+        scheduleAutoSync()
+    }
+
+    fun saveAutoPlaylistConfig(config: AutoPlaylistConfigDto) {
+        val prevTs = prefs.settings.value.autoConfigUpdatedAt
+        val clean = config.copy(
+            maxDurationMs = config.maxDurationMs?.takeIf { it > 0L },
+            favoriteBoostFactor = config.favoriteBoostFactor.coerceIn(1.5f, 10.0f),
+            cooldownTracks = config.cooldownTracks.coerceIn(10, 50),
+            updatedAt = maxOf(nowEpochSeconds(), prevTs + 1L),
+        )
+        prefs.setAutoPlaylistConfig(clean)
+        scheduleAutoSync()
     }
 
     suspend fun createPlaylist(
@@ -425,6 +573,7 @@ class SyncRepository(
         if (initialTrackIds.isNotEmpty()) {
             dao.replacePlaylistTracks(playlist.id, initialTrackIds)
         }
+        scheduleAutoSync()
         return playlist
     }
 
@@ -438,6 +587,7 @@ class SyncRepository(
                 updatedAt = nextTs,
             )
         )
+        scheduleAutoSync()
     }
 
     suspend fun deletePlaylist(playlistId: String) {
@@ -450,6 +600,7 @@ class SyncRepository(
             )
         )
         dao.clearPlaylistTrackRefs(playlistId)
+        scheduleAutoSync()
     }
 
     suspend fun addTrackToPlaylist(playlistId: String, trackId: String) {
@@ -459,6 +610,7 @@ class SyncRepository(
         dao.replacePlaylistTracks(playlistId, refs + trackId)
         val nextTs = maxOf(nowEpochSeconds(), existing.updatedAt + 1L)
         dao.upsertPlaylist(existing.copy(updatedAt = nextTs))
+        scheduleAutoSync()
     }
 
     suspend fun removeTrackFromPlaylist(playlistId: String, trackId: String) {
@@ -467,6 +619,15 @@ class SyncRepository(
         dao.replacePlaylistTracks(playlistId, refs)
         val nextTs = maxOf(nowEpochSeconds(), existing.updatedAt + 1L)
         dao.upsertPlaylist(existing.copy(updatedAt = nextTs))
+        scheduleAutoSync()
+    }
+
+    suspend fun reorderPlaylistTracks(playlistId: String, orderedTrackIds: List<String>) {
+        val existing = dao.getPlaylistById(playlistId) ?: return
+        dao.replacePlaylistTracks(playlistId, orderedTrackIds)
+        val nextTs = maxOf(nowEpochSeconds(), existing.updatedAt + 1L)
+        dao.upsertPlaylist(existing.copy(updatedAt = nextTs))
+        scheduleAutoSync()
     }
 
     suspend fun downloadTrackOffline(trackId: String): Result<Unit> {

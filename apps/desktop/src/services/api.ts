@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AuthResponse,
+  AutoPlaylistConfig,
   DetectedPlaylistFile,
   ImportPlaylistReport,
   LibrarySnapshot,
@@ -73,7 +74,16 @@ export const api = {
     invoke<void>("export_playlist_m3u8", { playlistId, destPath }),
   toggleFavorite: (trackId: string) =>
     invoke<boolean>("toggle_favorite", { trackId }),
-  recordPlay: (trackId: string) => invoke<number>("record_play", { trackId }),
+  recordPlay: (trackId: string, isManual = false) =>
+    invoke<Track>("record_play", { trackId, isManual }),
+  recordSkip: (trackId: string) =>
+    invoke<Track>("record_skip", { trackId }),
+  setTrackAutoExcluded: (trackId: string, excluded: boolean) =>
+    invoke<Track>("set_track_auto_excluded", { trackId, excluded }),
+  getAutoPlaylistConfig: () =>
+    invoke<AutoPlaylistConfig>("get_auto_playlist_config"),
+  saveAutoPlaylistConfig: (config: AutoPlaylistConfig) =>
+    invoke<AutoPlaylistConfig>("save_auto_playlist_config", { config }),
   toggleRadioFavorite: (station: RadioStation) =>
     invoke<boolean>("toggle_radio_favorite", { station }),
   saveSetting: (key: string, value: string) =>

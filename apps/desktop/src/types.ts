@@ -16,12 +16,25 @@ export interface Track {
   modified_at: number;
   cover_hash: string | null;
   play_count: number;
+  manual_play_count: number;
+  skip_count: number;
+  auto_excluded: boolean;
+  last_played_at: number;
   is_favorite: boolean;
   added_at: number;
   edit_speed: number;
   edit_gain_db: number;
   trim_start_ms: number;
   trim_end_ms: number | null;
+}
+
+export interface AutoPlaylistConfig {
+  max_duration_ms: number | null;
+  favorite_boost_enabled: boolean;
+  favorite_boost_factor: number;
+  cooldown_enabled: boolean;
+  cooldown_tracks: number;
+  updated_at: number;
 }
 
 export interface TrackEditDraft {
@@ -107,6 +120,7 @@ export interface LibrarySnapshot {
 export type ActiveView =
   | { kind: "library" }
   | { kind: "favorites" }
+  | { kind: "auto" }
   | { kind: "playlist"; playlistId: string }
   | { kind: "radio" }
   | { kind: "sync" };

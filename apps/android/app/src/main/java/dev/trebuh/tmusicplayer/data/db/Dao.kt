@@ -30,6 +30,38 @@ interface MusicDao {
     @Query("UPDATE tracks SET isFavorite = :isFavorite, favoriteUpdatedAt = :updatedAt WHERE id = :trackId")
     suspend fun updateFavorite(trackId: String, isFavorite: Boolean, updatedAt: Long)
 
+    @Query(
+        """
+        UPDATE tracks
+        SET playCount = playCount + 1,
+            manualPlayCount = manualPlayCount + :manualDelta,
+            lastPlayedAt = :nowSec,
+            statsUpdatedAt = MAX(statsUpdatedAt + 1, :nowSec)
+        WHERE id = :trackId
+        """
+    )
+    suspend fun recordTrackPlay(trackId: String, manualDelta: Long, nowSec: Long)
+
+    @Query(
+        """
+        UPDATE tracks
+        SET skipCount = skipCount + 1,
+            statsUpdatedAt = MAX(statsUpdatedAt + 1, :nowSec)
+        WHERE id = :trackId
+        """
+    )
+    suspend fun recordTrackSkip(trackId: String, nowSec: Long)
+
+    @Query(
+        """
+        UPDATE tracks
+        SET autoExcluded = :excluded,
+            statsUpdatedAt = MAX(statsUpdatedAt + 1, :nowSec)
+        WHERE id = :trackId
+        """
+    )
+    suspend fun updateTrackAutoExcluded(trackId: String, excluded: Boolean, nowSec: Long)
+
     @Query("UPDATE tracks SET localAudioPath = :localPath WHERE id = :trackId")
     suspend fun updateLocalAudioPath(trackId: String, localPath: String?)
 

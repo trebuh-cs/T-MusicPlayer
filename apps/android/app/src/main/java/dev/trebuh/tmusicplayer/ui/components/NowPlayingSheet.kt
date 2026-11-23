@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
+import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Favorite
@@ -80,6 +81,7 @@ fun NowPlayingSheet(
     onDownloadOffline: () -> Unit,
     onRemoveOffline: () -> Unit,
     onAddToPlaylist: () -> Unit,
+    onToggleAutoExcluded: () -> Unit,
     onSetPlaybackRate: (Float) -> Unit,
 ) {
     val palette = LocalTMusicColors.current
@@ -366,6 +368,46 @@ fun NowPlayingSheet(
                             fontWeight = FontWeight.Medium,
                         )
                     }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Auto Mix Inclusion / Exclusion toggle
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (track.autoExcluded) palette.bgSurface else palette.bgSurface)
+                    .border(
+                        1.dp,
+                        if (track.autoExcluded) palette.accent else palette.borderSubtle,
+                        RoundedCornerShape(10.dp),
+                    )
+                    .clickable(onClick = onToggleAutoExcluded)
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Block,
+                        contentDescription = null,
+                        tint = if (track.autoExcluded) palette.accent else palette.textSecondary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Text(
+                        text = if (track.autoExcluded) {
+                            "Excluded from Auto Playlist (Tap to Include)"
+                        } else {
+                            "Exclude from Auto Playlist"
+                        },
+                        color = if (track.autoExcluded) palette.accent else palette.textPrimary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
                 }
             }
 

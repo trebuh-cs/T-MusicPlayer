@@ -4011,6 +4011,7 @@ dependencies = [
  "sha2 0.10.9",
  "t-music-core",
  "tokio",
+ "tokio-util",
  "tower",
  "tower-http",
  "tracing",

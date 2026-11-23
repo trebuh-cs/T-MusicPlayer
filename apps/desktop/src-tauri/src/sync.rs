@@ -11,8 +11,8 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use t_music_core::models::{
     AuthResponse, CheckHashesRequest, CheckHashesResponse, ServerHealth, ServerTrack,
-    SyncFavoritePayload, SyncPlaylistPayload, SyncPullResponse, SyncPushRequest,
-    SyncPushResponse, SyncTrackEditPayload,
+    SyncFavoritePayload, SyncPlaylistPayload, SyncPullResponse, SyncPushRequest, SyncPushResponse,
+    SyncTrackEditPayload, SyncTrackStatsPayload,
 };
 use t_music_core::scanner::compute_file_hash;
 use tauri::{AppHandle, Emitter};
@@ -709,6 +709,38 @@ async fn sync_library_inner(app: &AppHandle, db: &Database) -> Result<SyncSummar
         })
         .collect();
 
+    let push_track_stats: Vec<SyncTrackStatsPayload> = sync_rows
+        .iter()
+        .filter_map(|t| {
+            t.server_track_id.as_ref().and_then(|sid| {
+                if t.play_count > 0
+                    || t.manual_play_count > 0
+                    || t.skip_count > 0
+                    || t.auto_excluded
+                    || t.stats_updated_at > 0
+                {
+                    Some(SyncTrackStatsPayload {
+                        track_id: sid.clone(),
+                        play_count: t.play_count,
+                        manual_play_count: t.manual_play_count,
+                        skip_count: t.skip_count,
+                        auto_excluded: t.auto_excluded,
+                        last_played_at: t.last_played_at,
+                        updated_at: t.stats_updated_at,
+                    })
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+
+    let local_auto_cfg = db.get_auto_playlist_config().ok();
+    let push_auto_cfg = local_auto_cfg
+        .as_ref()
+        .filter(|c| c.updated_at > 0)
+        .cloned();
+
     let push_resp = client
         .post(format!("{base}/api/v1/sync/push"))
         .bearer_auth(&token)
@@ -716,6 +748,8 @@ async fn sync_library_inner(app: &AppHandle, db: &Database) -> Result<SyncSummar
             playlists: push_playlists,
             favorites: push_favorites,
             track_edits: push_track_edits,
+            track_stats: push_track_stats,
+            auto_playlist_config: push_auto_cfg,
         })
         .send()
         .await
@@ -825,6 +859,14 @@ async fn sync_library_inner(app: &AppHandle, db: &Database) -> Result<SyncSummar
 
     for edit in &pulled.track_edits {
         let _ = db.apply_remote_track_edit_sync(edit)?;
+    }
+
+    for stats in &pulled.track_stats {
+        let _ = db.apply_remote_track_stats_sync(stats)?;
+    }
+
+    if let Some(remote_auto_cfg) = &pulled.auto_playlist_config {
+        let _ = db.apply_remote_auto_playlist_config(remote_auto_cfg)?;
     }
 
     db.save_setting("last_sync_at", &pulled.server_time.to_string())?;

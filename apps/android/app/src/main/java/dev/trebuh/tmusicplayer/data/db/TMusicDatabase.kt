@@ -13,7 +13,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PlaylistEntity::class,
         PlaylistTrackCrossRef::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = false,
 )
 abstract class TMusicDatabase : RoomDatabase() {
@@ -30,6 +30,17 @@ abstract class TMusicDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN playCount INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN manualPlayCount INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN skipCount INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN autoExcluded INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN lastPlayedAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE tracks ADD COLUMN statsUpdatedAt INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         @Volatile
         private var instance: TMusicDatabase? = null
 
@@ -40,7 +51,7 @@ abstract class TMusicDatabase : RoomDatabase() {
                     TMusicDatabase::class.java,
                     "t_music_android.db",
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .build()
                     .also { instance = it }
             }

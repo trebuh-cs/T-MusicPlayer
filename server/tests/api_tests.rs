@@ -8,9 +8,9 @@ use http_body_util::BodyExt;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use t_music_core::models::{
-    AuthResponse, CheckHashesRequest, CheckHashesResponse, ServerHealth, ServerTrack,
-    SyncFavoritePayload, SyncPlaylistPayload, SyncPullResponse, SyncPushRequest,
-    SyncTrackEditPayload,
+    AuthResponse, AutoPlaylistConfig, CheckHashesRequest, CheckHashesResponse, ServerHealth,
+    ServerTrack, SyncFavoritePayload, SyncPlaylistPayload, SyncPullResponse, SyncPushRequest,
+    SyncTrackEditPayload, SyncTrackStatsPayload,
 };
 use t_music_server::config::ServerConfig;
 use t_music_server::db::ServerDb;
@@ -323,6 +323,23 @@ async fn multi_user_auth_upload_dedup_range_stream_and_two_way_sync() {
             trim_end_ms: Some(120000),
             updated_at: 100,
         }],
+        track_stats: vec![SyncTrackStatsPayload {
+            track_id: uploaded.id.clone(),
+            play_count: 5,
+            manual_play_count: 3,
+            skip_count: 1,
+            auto_excluded: false,
+            last_played_at: 1000,
+            updated_at: 100,
+        }],
+        auto_playlist_config: Some(AutoPlaylistConfig {
+            max_duration_ms: Some(480_000),
+            favorite_boost_enabled: true,
+            favorite_boost_factor: 4.5,
+            cooldown_enabled: true,
+            cooldown_tracks: 10,
+            updated_at: 100,
+        }),
     };
     let push_a_resp = app
         .clone()
@@ -342,8 +359,47 @@ async fn multi_user_auth_upload_dedup_range_stream_and_two_way_sync() {
     assert_eq!(push_val["applied_playlists"], 2);
     assert_eq!(push_val["applied_favorites"], 1);
     assert_eq!(push_val["applied_track_edits"], 1);
+    assert_eq!(push_val["applied_track_stats"], 1);
 
-    // Alice pulls her own edit back cleanly.
+    // Verify monotonic merge for track_stats counters + LWW auto_excluded & auto_playlist_config.
+    let push_a_second = SyncPushRequest {
+        playlists: vec![],
+        favorites: vec![],
+        track_edits: vec![],
+        track_stats: vec![SyncTrackStatsPayload {
+            track_id: uploaded.id.clone(),
+            play_count: 2, // lower than existing 5 -> keeps 5
+            manual_play_count: 6, // higher than existing 3 -> takes 6
+            skip_count: 0, // lower than existing 1 -> keeps 1
+            auto_excluded: true, // newer updated_at (150 >= 100) -> becomes true
+            last_played_at: 900, // lower than 1000 -> keeps 1000
+            updated_at: 150,
+        }],
+        auto_playlist_config: Some(AutoPlaylistConfig {
+            max_duration_ms: Some(300_000),
+            favorite_boost_enabled: false,
+            favorite_boost_factor: 6.0,
+            cooldown_enabled: false,
+            cooldown_tracks: 10,
+            updated_at: 150,
+        }),
+    };
+    let push_a2_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/sync/push")
+                .header(header::AUTHORIZATION, format!("Bearer {}", auth_a.token))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&push_a_second).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(push_a2_resp.status(), StatusCode::OK);
+
+    // Alice pulls her own edit, merged stats, and auto playlist config back cleanly.
     let pull_a_resp = app
         .clone()
         .oneshot(
@@ -362,6 +418,31 @@ async fn multi_user_auth_upload_dedup_range_stream_and_two_way_sync() {
     assert!((pull_a.track_edits[0].gain_db - 3.5).abs() < 0.001);
     assert_eq!(pull_a.track_edits[0].trim_start_ms, 4000);
     assert_eq!(pull_a.track_edits[0].trim_end_ms, Some(120000));
+    assert_eq!(pull_a.track_stats.len(), 1);
+    assert_eq!(pull_a.track_stats[0].play_count, 5);
+    assert_eq!(pull_a.track_stats[0].manual_play_count, 6);
+    assert_eq!(pull_a.track_stats[0].skip_count, 1);
+    assert!(pull_a.track_stats[0].auto_excluded);
+    assert_eq!(pull_a.track_stats[0].last_played_at, 1000);
+    let pulled_cfg = pull_a.auto_playlist_config.unwrap();
+    assert_eq!(pulled_cfg.max_duration_ms, Some(300_000));
+    assert!(!pulled_cfg.favorite_boost_enabled);
+    assert!((pulled_cfg.favorite_boost_factor - 6.0).abs() < 0.01);
+    assert!(!pulled_cfg.cooldown_enabled);
+
+    // Verify full non-Range stream via ReaderStream returns exact bytes.
+    let full_stream_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/stream/{}?token={}", uploaded.id, auth_a.token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(full_stream_resp.status(), StatusCode::OK);
+    assert_eq!(read_body_bytes(full_stream_resp).await, payload_bytes);
 
     // Bob pulls: sees the shared playlist and shared tracks, NOT Alice's private playlist or favorite.
     let pull_b_resp = app
@@ -406,6 +487,8 @@ async fn multi_user_auth_upload_dedup_range_stream_and_two_way_sync() {
                         }],
                         favorites: vec![],
                         track_edits: vec![],
+                        track_stats: vec![],
+                        auto_playlist_config: None,
                     })
                     .unwrap(),
                 ))

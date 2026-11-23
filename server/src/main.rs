@@ -4,7 +4,9 @@ use std::net::SocketAddr;
 
 use t_music_server::config::ServerConfig;
 use t_music_server::db::ServerDb;
-use t_music_server::routes::{build_router, scan_server_music_directory};
+use t_music_server::routes::{
+    build_router, cleanup_stale_upload_sessions, scan_server_music_directory,
+};
 use t_music_server::AppState;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -18,6 +20,23 @@ async fn main() {
         .init();
 
     let config = ServerConfig::from_env().expect("Invalid server configuration");
+    let removed_sessions = cleanup_stale_upload_sessions(&config.data_dir, 6 * 3600);
+    if removed_sessions > 0 {
+        tracing::info!("Cleaned up {removed_sessions} stale upload session(s) on startup");
+    }
+    let data_dir_for_cleanup = config.data_dir.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let removed = cleanup_stale_upload_sessions(&data_dir_for_cleanup, 6 * 3600);
+            if removed > 0 {
+                tracing::info!("Cleaned up {removed} stale upload session(s)");
+            }
+        }
+    });
+
     let db_path = config.data_dir.join("t-music-server.db");
     let db = ServerDb::open(&db_path).expect("Failed to open server SQLite database");
     let state = AppState::initialize(config, db).expect("Failed to initialize server state");

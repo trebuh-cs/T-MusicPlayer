@@ -244,8 +244,41 @@ pub fn toggle_favorite(db: State<'_, Database>, track_id: String) -> Result<bool
 }
 
 #[tauri::command]
-pub fn record_play(db: State<'_, Database>, track_id: String) -> Result<u64, String> {
-    db.record_play(&track_id)
+pub fn record_play(
+    db: State<'_, Database>,
+    track_id: String,
+    is_manual: Option<bool>,
+) -> Result<Track, String> {
+    db.record_play(&track_id, is_manual.unwrap_or(false))
+}
+
+#[tauri::command]
+pub fn record_skip(db: State<'_, Database>, track_id: String) -> Result<Track, String> {
+    db.record_skip(&track_id)
+}
+
+#[tauri::command]
+pub fn set_track_auto_excluded(
+    db: State<'_, Database>,
+    track_id: String,
+    excluded: bool,
+) -> Result<Track, String> {
+    db.set_track_auto_excluded(&track_id, excluded)
+}
+
+#[tauri::command]
+pub fn get_auto_playlist_config(
+    db: State<'_, Database>,
+) -> Result<t_music_core::models::AutoPlaylistConfig, String> {
+    db.get_auto_playlist_config()
+}
+
+#[tauri::command]
+pub fn save_auto_playlist_config(
+    db: State<'_, Database>,
+    config: t_music_core::models::AutoPlaylistConfig,
+) -> Result<t_music_core::models::AutoPlaylistConfig, String> {
+    db.save_auto_playlist_config(&config)
 }
 
 #[tauri::command]

@@ -18,6 +18,13 @@ services:
       - ./server-data:/app/data
       - ./server-music:/app/music
       - ./server-downloads:/app/downloads
+    mem_limit: 512m
+    memswap_limit: 768m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8484/api/v1/health"]
       interval: 30s

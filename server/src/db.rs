@@ -7,8 +7,9 @@ use std::sync::Mutex;
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use t_music_core::models::{
-    ScannedTrack, ServerTrack, SyncFavoritePayload, SyncPlaylistPayload, SyncPullResponse,
-    SyncPushRequest, SyncPushResponse, SyncTrackEditPayload, UserProfile,
+    AutoPlaylistConfig, ScannedTrack, ServerTrack, SyncFavoritePayload, SyncPlaylistPayload,
+    SyncPullResponse, SyncPushRequest, SyncPushResponse, SyncTrackEditPayload,
+    SyncTrackStatsPayload, UserProfile,
 };
 use t_music_core::scanner::ExtractedCover;
 use uuid::Uuid;
@@ -134,6 +135,28 @@ impl ServerDb {
                 trim_end_ms INTEGER,
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY (user_id, track_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS user_track_stats (
+                user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+                play_count INTEGER NOT NULL DEFAULT 0,
+                manual_play_count INTEGER NOT NULL DEFAULT 0,
+                skip_count INTEGER NOT NULL DEFAULT 0,
+                auto_excluded INTEGER NOT NULL DEFAULT 0,
+                last_played_at INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, track_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS user_auto_playlist_config (
+                user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                max_duration_ms INTEGER,
+                favorite_boost_enabled INTEGER NOT NULL DEFAULT 1,
+                favorite_boost_factor REAL NOT NULL DEFAULT 3.0,
+                cooldown_enabled INTEGER NOT NULL DEFAULT 1,
+                cooldown_tracks INTEGER NOT NULL DEFAULT 10,
+                updated_at INTEGER NOT NULL DEFAULT 0
             );
 
             INSERT OR IGNORE INTO user_tracks (user_id, track_id, added_at)
@@ -588,12 +611,57 @@ impl ServerDb {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
 
+        let mut stats_stmt = conn
+            .prepare(
+                "SELECT track_id, play_count, manual_play_count, skip_count, auto_excluded, last_played_at, updated_at
+                 FROM user_track_stats WHERE user_id = ?1",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let track_stats = stats_stmt
+            .query_map(params![user_id], |row| {
+                Ok(SyncTrackStatsPayload {
+                    track_id: row.get(0)?,
+                    play_count: row.get::<_, i64>(1)?.max(0) as u64,
+                    manual_play_count: row.get::<_, i64>(2)?.max(0) as u64,
+                    skip_count: row.get::<_, i64>(3)?.max(0) as u64,
+                    auto_excluded: row.get::<_, i64>(4)? != 0,
+                    last_played_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+
+        let auto_playlist_config = conn
+            .query_row(
+                "SELECT max_duration_ms, favorite_boost_enabled, favorite_boost_factor,
+                        cooldown_enabled, cooldown_tracks, updated_at
+                 FROM user_auto_playlist_config WHERE user_id = ?1",
+                params![user_id],
+                |row| {
+                    Ok(AutoPlaylistConfig {
+                        max_duration_ms: row.get::<_, Option<i64>>(0)?.map(|v| v.max(0) as u64),
+                        favorite_boost_enabled: row.get::<_, i64>(1)? != 0,
+                        favorite_boost_factor: (row.get::<_, f64>(2)? as f32).clamp(1.5, 10.0),
+                        cooldown_enabled: row.get::<_, i64>(3)? != 0,
+                        cooldown_tracks: (row.get::<_, i64>(4)? as u32).clamp(10, 50),
+                        updated_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+
         Ok(SyncPullResponse {
             server_time: Utc::now().timestamp(),
             tracks,
             playlists,
             favorites,
             track_edits,
+            track_stats,
+            auto_playlist_config,
         })
     }
 
@@ -608,6 +676,7 @@ impl ServerDb {
         let mut applied_playlists = 0;
         let mut applied_favorites = 0;
         let mut applied_track_edits = 0;
+        let mut applied_track_stats = 0;
 
         for pl in &req.playlists {
             let existing: Option<(String, i64)> = tx
@@ -789,6 +858,123 @@ impl ServerDb {
             applied_track_edits += 1;
         }
 
+        for stats in &req.track_stats {
+            let track_exists: bool = tx
+                .query_row(
+                    "SELECT 1 FROM tracks WHERE id = ?1",
+                    params![stats.track_id],
+                    |_| Ok(true),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?
+                .unwrap_or(false);
+            if !track_exists {
+                continue;
+            }
+
+            let existing: Option<(i64, i64, i64, i64, i64, i64)> = tx
+                .query_row(
+                    "SELECT play_count, manual_play_count, skip_count, auto_excluded, last_played_at, updated_at
+                     FROM user_track_stats WHERE user_id = ?1 AND track_id = ?2",
+                    params![user_id, stats.track_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+
+            let (play_count, manual_play_count, skip_count, auto_excluded, last_played_at, updated_at) =
+                if let Some((ex_play, ex_manual, ex_skip, ex_excl, ex_last, ex_ts)) = existing {
+                    let next_excl = if stats.updated_at >= ex_ts {
+                        if stats.auto_excluded { 1 } else { 0 }
+                    } else {
+                        ex_excl
+                    };
+                    (
+                        ex_play.max(stats.play_count as i64),
+                        ex_manual.max(stats.manual_play_count as i64),
+                        ex_skip.max(stats.skip_count as i64),
+                        next_excl,
+                        ex_last.max(stats.last_played_at),
+                        ex_ts.max(stats.updated_at),
+                    )
+                } else {
+                    (
+                        stats.play_count as i64,
+                        stats.manual_play_count as i64,
+                        stats.skip_count as i64,
+                        if stats.auto_excluded { 1 } else { 0 },
+                        stats.last_played_at,
+                        stats.updated_at,
+                    )
+                };
+
+            tx.execute(
+                "INSERT INTO user_track_stats (
+                    user_id, track_id, play_count, manual_play_count, skip_count,
+                    auto_excluded, last_played_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(user_id, track_id) DO UPDATE SET
+                    play_count = excluded.play_count,
+                    manual_play_count = excluded.manual_play_count,
+                    skip_count = excluded.skip_count,
+                    auto_excluded = excluded.auto_excluded,
+                    last_played_at = excluded.last_played_at,
+                    updated_at = excluded.updated_at",
+                params![
+                    user_id,
+                    stats.track_id,
+                    play_count,
+                    manual_play_count,
+                    skip_count,
+                    auto_excluded,
+                    last_played_at,
+                    updated_at,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            applied_track_stats += 1;
+        }
+
+        if let Some(cfg) = &req.auto_playlist_config {
+            let existing_ts: Option<i64> = tx
+                .query_row(
+                    "SELECT updated_at FROM user_auto_playlist_config WHERE user_id = ?1",
+                    params![user_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+
+            if !existing_ts.is_some_and(|ts| cfg.updated_at < ts) {
+                let max_dur = cfg.max_duration_ms.map(|v| v as i64);
+                let boost_factor = cfg.favorite_boost_factor.clamp(1.5, 10.0) as f64;
+                let cooldown_tracks = cfg.cooldown_tracks.clamp(10, 50) as i64;
+                tx.execute(
+                    "INSERT INTO user_auto_playlist_config (
+                        user_id, max_duration_ms, favorite_boost_enabled,
+                        favorite_boost_factor, cooldown_enabled, cooldown_tracks, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(user_id) DO UPDATE SET
+                        max_duration_ms = excluded.max_duration_ms,
+                        favorite_boost_enabled = excluded.favorite_boost_enabled,
+                        favorite_boost_factor = excluded.favorite_boost_factor,
+                        cooldown_enabled = excluded.cooldown_enabled,
+                        cooldown_tracks = excluded.cooldown_tracks,
+                        updated_at = excluded.updated_at",
+                    params![
+                        user_id,
+                        max_dur,
+                        if cfg.favorite_boost_enabled { 1 } else { 0 },
+                        boost_factor,
+                        if cfg.cooldown_enabled { 1 } else { 0 },
+                        cooldown_tracks,
+                        cfg.updated_at,
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+
         tx.commit().map_err(|e| e.to_string())?;
 
         Ok(SyncPushResponse {
@@ -796,6 +982,7 @@ impl ServerDb {
             applied_playlists,
             applied_favorites,
             applied_track_edits,
+            applied_track_stats,
         })
     }
 }

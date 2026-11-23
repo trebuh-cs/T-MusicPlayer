@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { AlertCircle, X } from "lucide-react";
+import { AutoPlaylistView } from "./components/AutoPlaylistView";
 import { CinematicOverlay } from "./components/CinematicOverlay";
 import { CinematicSettingsModal } from "./components/CinematicSettingsModal";
 import { PlayerBar } from "./components/PlayerBar";
@@ -16,6 +17,11 @@ import { WmpImportModal } from "./components/WmpImportModal";
 import { useAudioEngine } from "./hooks/useAudioEngine";
 import { api, getCoverUrl, getTrackPlaybackUrl } from "./services/api";
 import {
+  DEFAULT_AUTO_PLAYLIST_CONFIG,
+  isTrackEligibleForAutoPlaylist,
+  pickNextAutoTrack,
+} from "./utils/autoPlaylist";
+import {
   applyThemeToDocument,
   extractAccentFromImage,
   getThemeById,
@@ -24,6 +30,7 @@ import {
 import {
   DEFAULT_CINEMATIC_CONFIG,
   type ActiveView,
+  type AutoPlaylistConfig,
   type CinematicConfig,
   type EqSettings,
   type MusicFolder,
@@ -81,24 +88,28 @@ export function App() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncProgress, setSyncProgress] = useState<SyncProgressEvent | null>(null);
   const [lastSyncSummary, setLastSyncSummary] = useState<SyncSummary | null>(null);
+  const [autoConfig, setAutoConfig] = useState<AutoPlaylistConfig>(
+    DEFAULT_AUTO_PLAYLIST_CONFIG
+  );
+  const [recentPlayIds, setRecentPlayIds] = useState<string[]>([]);
 
   const cinematicEnteredFullscreenRef = useRef(false);
   const pendingWritesRef = useRef<Map<string, string>>(new Map());
   const writeTimersRef = useRef<Map<string, number>>(new Map());
+  const autoSyncTimerRef = useRef<number | null>(null);
+  const lastFocusSyncAtRef = useRef<number>(0);
 
-  const onTrackPlayRecorded = useCallback((trackId: string) => {
-    setTracks((prev) =>
-      prev.map((t) => (t.id === trackId ? { ...t, play_count: t.play_count + 1 } : t))
-    );
-  }, []);
-
-  const resolveTrackUrl = useCallback(
-    (track: Track) => getTrackPlaybackUrl(track, serverUrl, serverToken),
-    [serverUrl, serverToken]
-  );
-
-  const engine = useAudioEngine(onTrackPlayRecorded, resolveTrackUrl);
-  const { hydratePreferences } = engine;
+  const tracksRef = useRef(tracks);
+  tracksRef.current = tracks;
+  const autoConfigRef = useRef(autoConfig);
+  autoConfigRef.current = autoConfig;
+  const recentPlayIdsRef = useRef(recentPlayIds);
+  recentPlayIdsRef.current = recentPlayIds;
+  const serverConnectedRef = useRef(false);
+  serverConnectedRef.current = Boolean(serverToken && serverUrl);
+  const isSyncingRef = useRef(false);
+  isSyncingRef.current = isSyncing;
+  const scheduleAutoSyncRef = useRef<(delayMs?: number) => void>(() => {});
 
   const scheduleSettingWrite = useCallback(
     (key: string, value: string, immediate = false) => {
@@ -127,6 +138,52 @@ export function App() {
     },
     []
   );
+
+  const onTrackPlayRecorded = useCallback(
+    (updated: Track) => {
+      setTracks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+      setPlaylistTracks((prev) =>
+        prev.map((t) => (t.id === updated.id ? updated : t))
+      );
+      setRecentPlayIds((prev) => {
+        const next = [updated.id, ...prev.filter((id) => id !== updated.id)].slice(0, 25);
+        scheduleSettingWrite("auto_recent_play_ids", JSON.stringify(next), true);
+        return next;
+      });
+      scheduleAutoSyncRef.current(4000);
+    },
+    [scheduleSettingWrite]
+  );
+
+  const onTrackSkipped = useCallback((updated: Track) => {
+    setTracks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+    setPlaylistTracks((prev) =>
+      prev.map((t) => (t.id === updated.id ? updated : t))
+    );
+    scheduleAutoSyncRef.current(4000);
+  }, []);
+
+  const autoNextTrackProvider = useCallback((currentTrackId: string | null) => {
+    return pickNextAutoTrack(
+      tracksRef.current,
+      autoConfigRef.current,
+      recentPlayIdsRef.current,
+      currentTrackId
+    );
+  }, []);
+
+  const resolveTrackUrl = useCallback(
+    (track: Track) => getTrackPlaybackUrl(track, serverUrl, serverToken),
+    [serverUrl, serverToken]
+  );
+
+  const engine = useAudioEngine(
+    onTrackPlayRecorded,
+    resolveTrackUrl,
+    onTrackSkipped,
+    autoNextTrackProvider
+  );
+  const { hydratePreferences } = engine;
 
   const flushPendingSettings = useCallback(async () => {
     for (const timer of writeTimersRef.current.values()) {
@@ -157,6 +214,23 @@ export function App() {
       const parsedLastSync =
         s.last_sync_at !== undefined ? Number(s.last_sync_at) : NaN;
       setLastSyncAt(Number.isFinite(parsedLastSync) ? parsedLastSync : null);
+
+      const parsedAutoCfg = parseJsonSetting<AutoPlaylistConfig>(s.auto_playlist_config);
+      if (parsedAutoCfg) {
+        setAutoConfig({ ...DEFAULT_AUTO_PLAYLIST_CONFIG, ...parsedAutoCfg });
+      }
+      if (s.auto_recent_play_ids && !hydrateSettings) {
+        // Keep in-memory recent IDs unless hydrating from DB on startup.
+      } else if (s.auto_recent_play_ids) {
+        try {
+          const arr = JSON.parse(s.auto_recent_play_ids);
+          if (Array.isArray(arr)) {
+            setRecentPlayIds(arr.filter((v): v is string => typeof v === "string").slice(0, 25));
+          }
+        } catch {
+          // ignore invalid JSON
+        }
+      }
 
       if (!hydrateSettings) return;
       if (s.theme_id) setThemeId(s.theme_id);
@@ -210,34 +284,78 @@ export function App() {
     setPlaylistTracks(list);
   }, []);
 
-  const handleSyncNow = useCallback(async () => {
-    setIsSyncing(true);
-    setSyncProgress({
-      phase: "hashing",
-      percent: 0,
-      current: 0,
-      total: 0,
-      file_name: null,
-      bytes_sent: 0,
-      bytes_total: 0,
-      message: "Starting two-way sync…",
-    });
-    try {
-      const summary = await api.syncWithServer();
-      setLastSyncSummary(summary);
-      await refreshLibrary(false);
-      if (activeView.kind === "playlist") {
-        await refreshPlaylistTracks(activeView.playlistId);
+  const handleSyncNow = useCallback(
+    async (silent = false) => {
+      if (isSyncingRef.current || !serverConnectedRef.current) return;
+      isSyncingRef.current = true;
+      setIsSyncing(true);
+      if (!silent) {
+        setSyncProgress({
+          phase: "hashing",
+          percent: 0,
+          current: 0,
+          total: 0,
+          file_name: null,
+          bytes_sent: 0,
+          bytes_total: 0,
+          message: "Starting two-way sync…",
+        });
       }
-      setBannerMsg(
-        `Synced: +${summary.uploaded_tracks} uploaded, +${summary.pulled_tracks} pulled, ${summary.synced_playlists} playlists updated.`
-      );
-    } catch (err) {
-      setBannerMsg(String(err));
-    } finally {
-      setIsSyncing(false);
-    }
-  }, [activeView, refreshLibrary, refreshPlaylistTracks]);
+      try {
+        const summary = await api.syncWithServer();
+        setLastSyncSummary(summary);
+        await refreshLibrary(false);
+        if (activeView.kind === "playlist") {
+          await refreshPlaylistTracks(activeView.playlistId);
+        }
+        if (!silent) {
+          setBannerMsg(
+            `Synced: +${summary.uploaded_tracks} uploaded, +${summary.pulled_tracks} pulled, ${summary.synced_playlists} playlists updated.`
+          );
+        }
+      } catch (err) {
+        if (!silent) {
+          setBannerMsg(String(err));
+        }
+      } finally {
+        isSyncingRef.current = false;
+        setIsSyncing(false);
+      }
+    },
+    [activeView, refreshLibrary, refreshPlaylistTracks]
+  );
+
+  const scheduleAutoSync = useCallback(
+    (delayMs = 2500) => {
+      if (!serverConnectedRef.current) return;
+      if (autoSyncTimerRef.current !== null) {
+        window.clearTimeout(autoSyncTimerRef.current);
+      }
+      autoSyncTimerRef.current = window.setTimeout(() => {
+        autoSyncTimerRef.current = null;
+        void handleSyncNow(true);
+      }, delayMs);
+    },
+    [handleSyncNow]
+  );
+  scheduleAutoSyncRef.current = scheduleAutoSync;
+
+  useEffect(() => {
+    const onFocus = () => {
+      if (!serverConnectedRef.current || isSyncingRef.current) return;
+      const now = Date.now();
+      if (now - lastFocusSyncAtRef.current < 45_000) return;
+      lastFocusSyncAtRef.current = now;
+      scheduleAutoSyncRef.current(500);
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      if (autoSyncTimerRef.current !== null) {
+        window.clearTimeout(autoSyncTimerRef.current);
+      }
+    };
+  }, []);
 
   const handleServerLogout = useCallback(async () => {
     await api.serverLogout();
@@ -495,6 +613,7 @@ export function App() {
     try {
       const report = await api.addMusicFolder(selected);
       await refreshLibrary();
+      scheduleAutoSync();
       setBannerMsg(
         `Scanned folder: +${report.tracks_added} added, ${report.total_tracks} total tracks.`
       );
@@ -513,6 +632,7 @@ export function App() {
       if (activeView.kind === "playlist") {
         await refreshPlaylistTracks(activeView.playlistId);
       }
+      scheduleAutoSync();
       setBannerMsg(
         `Rescan complete: +${report.tracks_added} added, ${report.tracks_updated} updated, ${report.tracks_removed} removed.`
       );
@@ -535,6 +655,7 @@ export function App() {
     const created = await api.createPlaylist(name);
     await refreshLibrary();
     setActiveView({ kind: "playlist", playlistId: created.id });
+    scheduleAutoSync();
   };
 
   const handleToggleFavorite = async (trackId: string) => {
@@ -545,7 +666,51 @@ export function App() {
     setPlaylistTracks((prev) =>
       prev.map((t) => (t.id === trackId ? { ...t, is_favorite: nextFav } : t))
     );
+    scheduleAutoSync();
   };
+
+  const handleToggleAutoExcluded = useCallback(
+    async (track: Track, excluded: boolean) => {
+      try {
+        const updated = await api.setTrackAutoExcluded(track.id, excluded);
+        setTracks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+        setPlaylistTracks((prev) =>
+          prev.map((t) => (t.id === updated.id ? updated : t))
+        );
+        scheduleAutoSync();
+      } catch (err) {
+        setBannerMsg(String(err));
+      }
+    },
+    [scheduleAutoSync]
+  );
+
+  const handleSaveAutoPlaylistConfig = useCallback(
+    async (next: AutoPlaylistConfig) => {
+      setAutoConfig(next);
+      try {
+        const saved = await api.saveAutoPlaylistConfig(next);
+        setAutoConfig(saved);
+        scheduleAutoSync();
+      } catch (err) {
+        setBannerMsg(String(err));
+      }
+    },
+    [scheduleAutoSync]
+  );
+
+  const handleStartAutoMix = useCallback(() => {
+    const currentId =
+      engine.nowPlaying?.kind === "track" ? engine.nowPlaying.track.id : null;
+    const picked = pickNextAutoTrack(tracks, autoConfig, recentPlayIds, currentId);
+    if (!picked) {
+      setBannerMsg(
+        "No eligible tracks for Auto Playlist yet. Listen to at least one song first."
+      );
+      return;
+    }
+    engine.playAutoMixTrack(picked);
+  }, [autoConfig, engine, recentPlayIds, tracks]);
 
   const handleToggleRadioFavorite = async (station: RadioStation) => {
     await api.toggleRadioFavorite(station);
@@ -582,11 +747,12 @@ export function App() {
       setTracks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
       setPlaylistTracks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
       engine.updateTrackInPlayback(updated);
+      scheduleAutoSync();
       setBannerMsg(
-        `Saved playback defaults for "${updated.title}". Hit Sync to update your phone.`
+        `Saved playback defaults for "${updated.title}". Syncing automatically…`
       );
     },
-    [engine]
+    [engine, scheduleAutoSync]
   );
 
   const handleResetTrackEdit = useCallback(
@@ -596,9 +762,10 @@ export function App() {
       setPlaylistTracks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
       engine.updateTrackInPlayback(updated);
       setEditingTrack(updated);
+      scheduleAutoSync();
       setBannerMsg(`Reset "${updated.title}" back to original defaults.`);
     },
-    [engine]
+    [engine, scheduleAutoSync]
   );
 
   const handleDownloadAsMp3 = useCallback(async (track: Track) => {
@@ -631,6 +798,11 @@ export function App() {
   const favoriteTracks = useMemo(
     () => tracks.filter((t) => t.is_favorite),
     [tracks]
+  );
+
+  const autoEligibleCount = useMemo(
+    () => tracks.filter((t) => isTrackEligibleForAutoPlaylist(t, autoConfig)).length,
+    [tracks, autoConfig]
   );
 
   const activePlaylist = useMemo(
@@ -687,6 +859,8 @@ export function App() {
           folders={folders}
           totalTracks={tracks.length}
           favoriteCount={favoriteTracks.length}
+          autoEligibleCount={autoEligibleCount}
+          isAutoMixActive={engine.isAutoMixActive}
           isTpxTheme={themeId === "tpx"}
           isServerConnected={isServerConnected}
           onOpenWmpImport={() => setShowWmpModal(true)}
@@ -705,7 +879,7 @@ export function App() {
             isFullscreen={isFullscreen}
             onAddFolder={() => void handleAddFolder()}
             onRescan={() => void handleRescan()}
-            onSyncNow={() => void handleSyncNow()}
+            onSyncNow={() => void handleSyncNow(false)}
             onOpenThemes={() => setShowThemeDrawer(true)}
             onEnterCinematic={() => void enterCinematicMode()}
             onOpenCinematicSettings={() => setShowCinematicSettings(true)}
@@ -733,7 +907,22 @@ export function App() {
             </div>
           )}
 
-          {activeView.kind === "radio" ? (
+          {activeView.kind === "auto" ? (
+            <AutoPlaylistView
+              tracks={tracks}
+              config={autoConfig}
+              recentPlayIds={recentPlayIds}
+              activeTrackId={activeTrackId}
+              isAutoMixActive={engine.isAutoMixActive}
+              onStartAutoMix={handleStartAutoMix}
+              onPlaySpecificTrack={(track) => engine.playAutoMixTrack(track)}
+              onUpdateConfig={(next) => void handleSaveAutoPlaylistConfig(next)}
+              onToggleAutoExcluded={(track, excluded) =>
+                void handleToggleAutoExcluded(track, excluded)
+              }
+              onToggleFavorite={(id) => void handleToggleFavorite(id)}
+            />
+          ) : activeView.kind === "radio" ? (
             <RadioView
               favorites={radioFavorites}
               activeStationUuid={activeStationUuid}
@@ -753,7 +942,7 @@ export function App() {
               lastSyncSummary={lastSyncSummary}
               onAuthSuccess={() => refreshLibrary(false)}
               onLogout={handleServerLogout}
-              onSyncNow={handleSyncNow}
+              onSyncNow={() => handleSyncNow(false)}
             />
           ) : (
             <TrackList
@@ -781,13 +970,17 @@ export function App() {
               onEnqueue={engine.enqueueTrack}
               onToggleFavorite={(id) => void handleToggleFavorite(id)}
               onAddTracksToPlaylist={(playlistId, trackIds) => {
-                void api
-                  .addTracksToPlaylist(playlistId, trackIds)
-                  .then(() => refreshLibrary());
+                void api.addTracksToPlaylist(playlistId, trackIds).then(async () => {
+                  await refreshLibrary();
+                  scheduleAutoSync();
+                });
               }}
               onEditTrack={(track) => setEditingTrack(track)}
               onDownloadAsMp3={(track) => void handleDownloadAsMp3(track)}
               onRevealTrack={(track) => void handleRevealTrack(track)}
+              onToggleAutoExcluded={(track, excluded) =>
+                void handleToggleAutoExcluded(track, excluded)
+              }
               onRemoveFromPlaylist={
                 activeView.kind === "playlist"
                   ? (trackId) => {
@@ -796,6 +989,7 @@ export function App() {
                         .then(async () => {
                           await refreshLibrary();
                           await refreshPlaylistTracks(activeView.playlistId);
+                          scheduleAutoSync();
                         });
                     }
                   : undefined
@@ -805,16 +999,20 @@ export function App() {
                   ? (orderedIds) => {
                       void api
                         .reorderPlaylistTracks(activeView.playlistId, orderedIds)
-                        .then((updated) => setPlaylistTracks(updated));
+                        .then((updated) => {
+                          setPlaylistTracks(updated);
+                          scheduleAutoSync();
+                        });
                     }
                   : undefined
               }
               onRenamePlaylist={
                 activePlaylist
                   ? (newName) => {
-                      void api
-                        .renamePlaylist(activePlaylist.id, newName)
-                        .then(() => refreshLibrary());
+                      void api.renamePlaylist(activePlaylist.id, newName).then(async () => {
+                        await refreshLibrary();
+                        scheduleAutoSync();
+                      });
                     }
                   : undefined
               }
@@ -824,6 +1022,7 @@ export function App() {
                       void api.deletePlaylist(activePlaylist.id).then(async () => {
                         setActiveView({ kind: "library" });
                         await refreshLibrary();
+                        scheduleAutoSync();
                       });
                     }
                   : undefined
@@ -878,7 +1077,7 @@ export function App() {
         <WmpImportModal
           onClose={() => setShowWmpModal(false)}
           onImported={(report) => {
-            void refreshLibrary();
+            void refreshLibrary().then(() => scheduleAutoSync());
             setActiveView({ kind: "playlist", playlistId: report.playlist.id });
           }}
         />

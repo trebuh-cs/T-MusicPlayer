@@ -9,6 +9,7 @@ import {
   Plus,
   Radio,
   Server,
+  Sparkles,
   Upload,
 } from "lucide-react";
 import tpxLogoUrl from "../assets/tpx-logo.svg";
@@ -21,6 +22,8 @@ interface SidebarProps {
   folders: MusicFolder[];
   totalTracks: number;
   favoriteCount: number;
+  autoEligibleCount: number;
+  isAutoMixActive: boolean;
   isTpxTheme: boolean;
   isServerConnected: boolean;
   onOpenWmpImport: () => void;
@@ -35,6 +38,8 @@ export const Sidebar = memo(function Sidebar({
   folders,
   totalTracks,
   favoriteCount,
+  autoEligibleCount,
+  isAutoMixActive,
   isTpxTheme,
   isServerConnected,
   onOpenWmpImport,
@@ -131,6 +136,25 @@ export const Sidebar = memo(function Sidebar({
           </span>
           <span className="text-[11px] text-[var(--text-muted)] font-mono-num">
             {favoriteCount}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onSelectView({ kind: "auto" })}
+          className={navItemClass(activeView.kind === "auto")}
+        >
+          <span className="flex items-center gap-2.5">
+            <Sparkles
+              className="w-4 h-4"
+              style={{
+                color: activeView.kind === "auto" || isAutoMixActive ? "var(--accent)" : undefined,
+              }}
+            />
+            Auto Playlist
+          </span>
+          <span className="text-[11px] text-[var(--text-muted)] font-mono-num">
+            {isAutoMixActive ? "MIX" : autoEligibleCount}
           </span>
         </button>
 

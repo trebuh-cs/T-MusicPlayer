@@ -3,6 +3,7 @@ package dev.trebuh.tmusicplayer.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -41,17 +42,24 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import dev.trebuh.tmusicplayer.data.db.PlaylistSummary
 import dev.trebuh.tmusicplayer.data.db.TrackEntity
 import dev.trebuh.tmusicplayer.ui.theme.LocalTMusicColors
@@ -329,10 +337,23 @@ fun PlaylistDetailScreen(
     onRemoveOfflineTrack: (String) -> Unit,
     onAddTrackToPlaylist: (String) -> Unit,
     onRemoveTrackFromPlaylist: (String) -> Unit,
+    onReorderTracks: (List<String>) -> Unit,
 ) {
     val palette = LocalTMusicColors.current
     var showAddTracksDialog by remember { mutableStateOf(false) }
     val canEdit = playlist.ownerUsername.isBlank() || playlist.ownerUsername == currentUsername
+
+    val orderedTracks = remember { mutableStateListOf<TrackEntity>() }
+    var draggingTrackId by remember { mutableStateOf<String?>(null) }
+    var dragOffsetY by remember { mutableFloatStateOf(0f) }
+    val rowStepPx = with(LocalDensity.current) { 78.dp.toPx() }
+
+    LaunchedEffect(tracks, draggingTrackId) {
+        if (draggingTrackId == null) {
+            orderedTracks.clear()
+            orderedTracks.addAll(tracks)
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -462,18 +483,68 @@ fun PlaylistDetailScreen(
                 contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                itemsIndexed(tracks, key = { _, item -> item.id }) { index, track ->
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                itemsIndexed(orderedTracks, key = { _, item -> item.id }) { index, track ->
+                    val isDragging = draggingTrackId == track.id
+                    val leadingDragModifier = if (canEdit) {
+                        Modifier.pointerInput(track.id) {
+                            detectDragGestures(
+                                onDragStart = {
+                                    draggingTrackId = track.id
+                                    dragOffsetY = 0f
+                                },
+                                onDrag = { change, dragAmount ->
+                                    change.consume()
+                                    dragOffsetY += dragAmount.y
+                                    val currentIdx = orderedTracks.indexOfFirst { it.id == track.id }
+                                    if (currentIdx >= 0) {
+                                        if (dragOffsetY > rowStepPx * 0.55f && currentIdx < orderedTracks.lastIndex) {
+                                            val moved = orderedTracks.removeAt(currentIdx)
+                                            orderedTracks.add(currentIdx + 1, moved)
+                                            dragOffsetY -= rowStepPx
+                                        } else if (dragOffsetY < -rowStepPx * 0.55f && currentIdx > 0) {
+                                            val moved = orderedTracks.removeAt(currentIdx)
+                                            orderedTracks.add(currentIdx - 1, moved)
+                                            dragOffsetY += rowStepPx
+                                        }
+                                    }
+                                },
+                                onDragEnd = {
+                                    draggingTrackId = null
+                                    dragOffsetY = 0f
+                                    onReorderTracks(orderedTracks.map { it.id })
+                                },
+                                onDragCancel = {
+                                    draggingTrackId = null
+                                    dragOffsetY = 0f
+                                    orderedTracks.clear()
+                                    orderedTracks.addAll(tracks)
+                                },
+                            )
+                        }
+                    } else {
+                        Modifier
+                    }
+
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                        modifier = Modifier
+                            .zIndex(if (isDragging) 10f else 0f)
+                            .graphicsLayer {
+                                translationY = if (isDragging) dragOffsetY else 0f
+                            },
+                    ) {
                         TrackRow(
                             track = track,
                             isPlayingCurrent = track.id == currentTrackId,
                             downloadProgress = downloadProgress[track.id],
                             artworkModel = artworkModel(track),
-                            onClick = { onPlayQueue(tracks, index) },
+                            onClick = { onPlayQueue(orderedTracks.toList(), index) },
                             onToggleFavorite = { onToggleFavorite(track.id) },
                             onToggleOffline = {
                                 if (track.isDownloaded) onRemoveOfflineTrack(track.id) else onDownloadTrackOffline(track.id)
                             },
+                            leadingModifier = leadingDragModifier,
+                            showDragGripBadge = canEdit,
                         )
                         if (canEdit) {
                             Row(

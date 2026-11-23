@@ -1,5 +1,8 @@
 package dev.trebuh.tmusicplayer.ui.screens
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,7 +23,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.DragIndicator
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.OfflinePin
@@ -33,6 +38,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
@@ -68,10 +74,12 @@ fun LibraryScreen(
     playlists: List<PlaylistSummary>,
     currentTrackId: String?,
     isSyncing: Boolean,
+    uploadProgress: String?,
     syncMessage: String?,
     downloadProgress: Map<String, Float>,
     artworkModel: (TrackEntity) -> Any?,
     onSyncNow: () -> Unit,
+    onUploadAudioUris: (List<Uri>) -> Unit,
     onDismissSyncMessage: () -> Unit,
     onPlayQueue: (List<TrackEntity>, Int) -> Unit,
     onToggleFavorite: (String) -> Unit,
@@ -83,6 +91,14 @@ fun LibraryScreen(
     var query by rememberSaveable { mutableStateOf("") }
     var filter by rememberSaveable { mutableStateOf(LibraryFilter.ALL) }
     var trackForPlaylistDialog by remember { mutableStateOf<TrackEntity?>(null) }
+
+    val audioPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            onUploadAudioUris(uris)
+        }
+    }
 
     val filteredTracks = remember(tracks, query, filter) {
         val cleanQuery = query.trim().lowercase()
@@ -105,7 +121,7 @@ fun LibraryScreen(
             .fillMaxSize()
             .background(palette.bgBase),
     ) {
-        // Header + Two-Way Sync Button
+        // Header + Smartphone Upload + Two-Way Sync Button
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -113,7 +129,7 @@ fun LibraryScreen(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Column {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = "Library",
                     color = palette.textPrimary,
@@ -127,36 +143,90 @@ fun LibraryScreen(
                 )
             }
 
-            Button(
-                onClick = onSyncNow,
-                enabled = !isSyncing,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = palette.accentSoft,
-                    contentColor = palette.accent,
-                ),
-                shape = RoundedCornerShape(10.dp),
-                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (isSyncing) {
-                    CircularProgressIndicator(
-                        color = palette.accent,
-                        strokeWidth = 2.dp,
+                OutlinedButton(
+                    onClick = { audioPicker.launch(arrayOf("audio/*")) },
+                    enabled = uploadProgress == null && !isSyncing,
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.CloudUpload,
+                        contentDescription = "Upload audio from phone",
+                        tint = palette.accent,
                         modifier = Modifier.size(16.dp),
                     )
-                } else {
-                    Icon(
-                        imageVector = Icons.Rounded.Sync,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
+                    Spacer(modifier = Modifier.size(4.dp))
+                    Text(
+                        text = "Upload",
+                        color = palette.textPrimary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
                     )
                 }
-                Spacer(modifier = Modifier.size(6.dp))
+
+                Button(
+                    onClick = onSyncNow,
+                    enabled = !isSyncing && uploadProgress == null,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = palette.accentSoft,
+                        contentColor = palette.accent,
+                    ),
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                ) {
+                    if (isSyncing) {
+                        CircularProgressIndicator(
+                            color = palette.accent,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Rounded.Sync,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+                    Spacer(modifier = Modifier.size(6.dp))
+                    Text(
+                        text = if (isSyncing) "Syncing" else "Sync",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+        }
+
+        if (!uploadProgress.isNullOrBlank()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 2.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(palette.accentSoft)
+                    .border(1.dp, palette.accent, RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                CircularProgressIndicator(
+                    color = palette.accent,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(16.dp),
+                )
                 Text(
-                    text = if (isSyncing) "Syncing..." else "Sync",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    text = uploadProgress,
+                    color = palette.textPrimary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.weight(1f),
                 )
             }
+            Spacer(modifier = Modifier.height(6.dp))
         }
 
         if (!syncMessage.isNullOrBlank()) {
@@ -388,10 +458,13 @@ fun TrackRow(
     onToggleFavorite: () -> Unit,
     onToggleOffline: () -> Unit,
     onAddToPlaylist: (() -> Unit)? = null,
+    rowModifier: Modifier = Modifier,
+    leadingModifier: Modifier = Modifier,
+    showDragGripBadge: Boolean = false,
 ) {
     val palette = LocalTMusicColors.current
     Row(
-        modifier = Modifier
+        modifier = rowModifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
             .background(if (isPlayingCurrent) palette.accentSoft else palette.bgElevated)
@@ -405,12 +478,30 @@ fun TrackRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        ArtworkBox(
-            model = artworkModel,
-            contentDescription = track.album,
-            size = 46.dp,
-            cornerRadius = 8.dp,
-        )
+        Box(modifier = leadingModifier) {
+            ArtworkBox(
+                model = artworkModel,
+                contentDescription = track.album,
+                size = 46.dp,
+                cornerRadius = 8.dp,
+            )
+            if (showDragGripBadge) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(palette.bgBase.copy(alpha = 0.85f))
+                        .padding(1.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.DragIndicator,
+                        contentDescription = "Drag to reorder",
+                        tint = palette.accent,
+                        modifier = Modifier.size(12.dp),
+                    )
+                }
+            }
+        }
 
         Column(modifier = Modifier.weight(1f)) {
             Text(
