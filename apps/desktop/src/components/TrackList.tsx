@@ -1,4 +1,4 @@
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   ArrowDown,
@@ -8,7 +8,6 @@ import {
   Download,
   FolderOpen,
   FolderPlus,
-  GripVertical,
   Heart,
   ListPlus,
   MoreHorizontal,
@@ -99,8 +98,34 @@ export const TrackList = memo(function TrackList({
   const [menuState, setMenuState] = useState<TrackMenuState | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(playlist?.name ?? "");
-  const [dragIndex, setDragIndex] = useState<number | null>(null);
-  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const [draggingTrackId, setDraggingTrackId] = useState<string | null>(null);
+  const [dragOffsetY, setDragOffsetY] = useState(0);
+  const [localOrder, setLocalOrder] = useState<Track[] | null>(null);
+
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const localOrderRef = useRef<Track[] | null>(null);
+  const tracksRef = useRef(tracks);
+  tracksRef.current = tracks;
+  const onReorderRef = useRef(onReorderPlaylist);
+  onReorderRef.current = onReorderPlaylist;
+
+  const dragSessionRef = useRef<{
+    trackId: string;
+    startY: number;
+    anchorY: number;
+    active: boolean;
+    cleanup?: () => void;
+  } | null>(null);
+
+  // Clean up any active pointer drag on unmount.
+  useEffect(() => {
+    return () => {
+      dragSessionRef.current?.cleanup?.();
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+  }, []);
 
   useEffect(() => {
     if (!menuState) return;
@@ -138,7 +163,8 @@ export const TrackList = memo(function TrackList({
     setMenuState({ track, idx, x, y, openUpward });
   };
 
-  const totalMs = tracks.reduce((sum, t) => sum + t.duration_ms, 0);
+  const displayedTracks = localOrder ?? tracks;
+  const totalMs = displayedTracks.reduce((sum, t) => sum + t.duration_ms, 0);
   const totalMins = Math.floor(totalMs / 60000);
 
   const moveTrack = (index: number, delta: -1 | 1) => {
@@ -151,21 +177,125 @@ export const TrackList = memo(function TrackList({
     onReorderPlaylist(reordered.map((t) => t.id));
   };
 
-  const handleDrop = (dropIndex: number) => {
-    setDragOverIndex(null);
-    if (dragIndex === null || dragIndex === dropIndex || !onReorderPlaylist) {
-      setDragIndex(null);
-      return;
-    }
-    const reordered = [...tracks];
-    const [item] = reordered.splice(dragIndex, 1);
-    reordered.splice(dropIndex, 0, item);
-    setDragIndex(null);
-    onReorderPlaylist(reordered.map((t) => t.id));
+  const handleRowPointerDown = (
+    e: React.PointerEvent<HTMLDivElement>,
+    track: Track
+  ) => {
+    if (!onReorderRef.current || e.button !== 0) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest("button, input, a")) return;
+
+    dragSessionRef.current?.cleanup?.();
+
+    const session = {
+      trackId: track.id,
+      startY: e.clientY,
+      anchorY: e.clientY,
+      active: false,
+      cleanup: undefined as (() => void) | undefined,
+    };
+
+    const onPointerMove = (moveEvt: PointerEvent) => {
+      if (!session.active) {
+        if (Math.abs(moveEvt.clientY - session.startY) < 5) return;
+        session.active = true;
+        session.anchorY = moveEvt.clientY;
+        const copy = [...tracksRef.current];
+        localOrderRef.current = copy;
+        setLocalOrder(copy);
+        setDraggingTrackId(session.trackId);
+        setDragOffsetY(0);
+        setMenuState(null);
+        document.body.style.userSelect = "none";
+        document.body.style.cursor = "grabbing";
+      }
+
+      const list = localOrderRef.current;
+      if (!list) return;
+
+      // Gentle edge auto-scroll inside the playlist list
+      const scroller = scrollContainerRef.current;
+      if (scroller) {
+        const rect = scroller.getBoundingClientRect();
+        if (moveEvt.clientY < rect.top + 48) {
+          scroller.scrollTop -= 10;
+        } else if (moveEvt.clientY > rect.bottom - 48) {
+          scroller.scrollTop += 10;
+        }
+      }
+
+      const rowEl = rowRefs.current.get(session.trackId);
+      const step = (rowEl?.getBoundingClientRect().height || 52) + 2;
+      let offsetY = moveEvt.clientY - session.anchorY;
+      let currentIdx = list.findIndex((t) => t.id === session.trackId);
+
+      let mutated = false;
+      const nextList = [...list];
+      while (offsetY > step * 0.55 && currentIdx >= 0 && currentIdx < nextList.length - 1) {
+        const [moved] = nextList.splice(currentIdx, 1);
+        nextList.splice(currentIdx + 1, 0, moved);
+        currentIdx += 1;
+        session.anchorY += step;
+        offsetY = moveEvt.clientY - session.anchorY;
+        mutated = true;
+      }
+      while (offsetY < -step * 0.55 && currentIdx > 0) {
+        const [moved] = nextList.splice(currentIdx, 1);
+        nextList.splice(currentIdx - 1, 0, moved);
+        currentIdx -= 1;
+        session.anchorY -= step;
+        offsetY = moveEvt.clientY - session.anchorY;
+        mutated = true;
+      }
+
+      if (mutated) {
+        localOrderRef.current = nextList;
+        setLocalOrder(nextList);
+      }
+      setDragOffsetY(offsetY);
+    };
+
+    const finishDrag = (commit: boolean) => {
+      session.cleanup?.();
+      dragSessionRef.current = null;
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+
+      if (session.active) {
+        const finalOrder = localOrderRef.current;
+        localOrderRef.current = null;
+        setDraggingTrackId(null);
+        setDragOffsetY(0);
+        setLocalOrder(null);
+
+        if (commit && finalOrder && onReorderRef.current) {
+          const prevIds = tracksRef.current.map((t) => t.id);
+          const nextIds = finalOrder.map((t) => t.id);
+          const changed = nextIds.some((id, i) => id !== prevIds[i]);
+          if (changed) {
+            onReorderRef.current(nextIds);
+          }
+        }
+      }
+    };
+
+    const onPointerUp = () => finishDrag(true);
+    const onPointerCancel = () => finishDrag(false);
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", onPointerCancel);
+    session.cleanup = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerCancel);
+    };
+    dragSessionRef.current = session;
   };
 
   return (
     <div
+      ref={scrollContainerRef}
       className="flex-1 overflow-y-auto px-6 py-5"
       onScroll={() => {
         if (menuState) setMenuState(null);
@@ -354,13 +484,7 @@ export const TrackList = memo(function TrackList({
       ) : (
         <div className="mt-3">
           {/* Column Header */}
-          <div
-            className={`grid ${
-              onReorderPlaylist
-                ? "grid-cols-[58px_minmax(0,2.2fr)_minmax(0,1.4fr)_84px_64px_72px]"
-                : "grid-cols-[36px_minmax(0,2.2fr)_minmax(0,1.4fr)_84px_64px_72px]"
-            } gap-3 px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)]`}
-          >
+          <div className="grid grid-cols-[36px_minmax(0,2.2fr)_minmax(0,1.4fr)_84px_64px_72px] gap-3 px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
             <span className="text-center">#</span>
             <span>Title</span>
             <span className="hidden md:block">Album</span>
@@ -370,86 +494,68 @@ export const TrackList = memo(function TrackList({
           </div>
 
           <div className="space-y-0.5">
-            {tracks.map((track, idx) => {
+            {displayedTracks.map((track, idx) => {
               const isActive = track.id === activeTrackId;
+              const isDragging = draggingTrackId === track.id;
               const coverUrl = getCoverUrl(track.cover_hash);
               const edited = hasCustomEdit(track);
 
               return (
                 <div
                   key={track.id}
-                  draggable={Boolean(onReorderPlaylist)}
-                  onDragStart={(e) => {
-                    if (!onReorderPlaylist) return;
-                    e.dataTransfer.effectAllowed = "move";
-                    e.dataTransfer.setData("text/plain", track.id);
-                    setDragIndex(idx);
-                    setDragOverIndex(idx);
+                  ref={(el) => {
+                    if (el) rowRefs.current.set(track.id, el);
+                    else rowRefs.current.delete(track.id);
                   }}
-                  onDragOver={(e) => {
-                    if (onReorderPlaylist) {
-                      e.preventDefault();
-                      e.dataTransfer.dropEffect = "move";
-                      if (dragOverIndex !== idx) setDragOverIndex(idx);
-                    }
-                  }}
-                  onDragEnd={() => {
-                    setDragIndex(null);
-                    setDragOverIndex(null);
-                  }}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    handleDrop(idx);
-                  }}
-                  onDoubleClick={() => onPlayTrack(track, tracks)}
-                  className={`track-row-perf group relative grid ${
+                  onPointerDown={(e) => handleRowPointerDown(e, track)}
+                  onDoubleClick={() => onPlayTrack(track, displayedTracks)}
+                  style={
+                    isDragging
+                      ? {
+                          transform: `translateY(${dragOffsetY}px)`,
+                          zIndex: 20,
+                        }
+                      : undefined
+                  }
+                  className={`${
+                    isDragging ? "" : "track-row-perf"
+                  } group relative grid grid-cols-[36px_minmax(0,2.2fr)_minmax(0,1.4fr)_84px_64px_72px] items-center gap-3 px-3 py-2 rounded-xl select-none transition-colors ${
                     onReorderPlaylist
-                      ? "grid-cols-[58px_minmax(0,2.2fr)_minmax(0,1.4fr)_84px_64px_72px]"
-                      : "grid-cols-[36px_minmax(0,2.2fr)_minmax(0,1.4fr)_84px_64px_72px]"
-                  } items-center gap-3 px-3 py-2 rounded-xl transition-colors ${
-                    isActive
-                      ? "bg-[var(--accent-soft)]"
-                      : "hover:bg-[var(--bg-hover)]"
+                      ? isDragging
+                        ? "cursor-grabbing bg-[var(--bg-elevated)] border border-[var(--accent)]"
+                        : "cursor-grab"
+                      : ""
                   } ${
-                    dragOverIndex === idx && dragIndex !== null && dragIndex !== idx
-                      ? "border-t-2 border-[var(--accent)]"
+                    !isDragging && isActive
+                      ? "bg-[var(--accent-soft)]"
+                      : !isDragging
+                      ? "hover:bg-[var(--bg-hover)]"
                       : ""
                   }`}
                 >
-                  {/* Separate Drag Handle (when reorderable) + Track Index / Play Button */}
-                  <div className="flex items-center justify-center gap-0.5">
-                    {onReorderPlaylist && (
-                      <span
-                        title="Drag to reorder"
-                        onClick={(e) => e.stopPropagation()}
-                        className="flex items-center justify-center w-6 h-8 rounded-md text-[var(--text-muted)] hover:text-[var(--accent)] hover:bg-[var(--bg-surface)] cursor-grab active:cursor-grabbing shrink-0"
-                      >
-                        <GripVertical className="w-3.5 h-3.5" aria-hidden />
+                  {/* Track Index / Active Indicator / Play Button */}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onPlayTrack(track, displayedTracks);
+                    }}
+                    className="flex items-center justify-center w-8 h-8 rounded-lg text-xs font-mono-num text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
+                    aria-label={`Play ${track.title}`}
+                  >
+                    {isActive && isPlaying ? (
+                      <span className="flex items-end gap-0.5 h-3.5">
+                        <span className="w-0.5 h-full bg-[var(--accent)] animate-eq-1 rounded-full" />
+                        <span className="w-0.5 h-full bg-[var(--accent)] animate-eq-2 rounded-full" />
+                        <span className="w-0.5 h-full bg-[var(--accent)] animate-eq-3 rounded-full" />
                       </span>
+                    ) : (
+                      <>
+                        <span className="group-hover:hidden">{idx + 1}</span>
+                        <Play className="w-3.5 h-3.5 hidden group-hover:block text-[var(--accent)] fill-current" />
+                      </>
                     )}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onPlayTrack(track, tracks);
-                      }}
-                      className="flex items-center justify-center w-7 h-8 rounded-lg text-xs font-mono-num text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer shrink-0"
-                      aria-label={`Play ${track.title}`}
-                    >
-                      {isActive && isPlaying ? (
-                        <span className="flex items-end gap-0.5 h-3.5">
-                          <span className="w-0.5 h-full bg-[var(--accent)] animate-eq-1 rounded-full" />
-                          <span className="w-0.5 h-full bg-[var(--accent)] animate-eq-2 rounded-full" />
-                          <span className="w-0.5 h-full bg-[var(--accent)] animate-eq-3 rounded-full" />
-                        </span>
-                      ) : (
-                        <>
-                          <span className="group-hover:hidden">{idx + 1}</span>
-                          <Play className="w-3.5 h-3.5 hidden group-hover:block text-[var(--accent)] fill-current" />
-                        </>
-                      )}
-                    </button>
-                  </div>
+                  </button>
 
                   {/* Cover + Title + Artist */}
                   <div className="flex items-center gap-3 min-w-0">
@@ -458,7 +564,8 @@ export const TrackList = memo(function TrackList({
                         src={coverUrl}
                         alt=""
                         loading="lazy"
-                        className="w-9 h-9 rounded-lg object-cover shrink-0 bg-[var(--bg-surface)]"
+                        draggable={false}
+                        className="w-9 h-9 rounded-lg object-cover shrink-0 bg-[var(--bg-surface)] pointer-events-none"
                       />
                     ) : (
                       <div className="w-9 h-9 rounded-lg shrink-0 bg-[var(--bg-surface)] border border-[var(--border-subtle)] flex items-center justify-center text-[var(--text-muted)]">
