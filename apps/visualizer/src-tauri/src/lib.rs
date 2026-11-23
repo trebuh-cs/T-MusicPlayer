@@ -49,7 +49,7 @@ fn is_wallpaper_mode(wp: State<'_, WallpaperManager>) -> bool {
 }
 
 #[tauri::command]
-fn set_wallpaper_mode(
+async fn set_wallpaper_mode(
     app: AppHandle,
     wp: State<'_, WallpaperManager>,
     enabled: bool,
@@ -191,8 +191,11 @@ pub fn run() {
                         }
                     }
                     "toggle_wallpaper" => {
-                        let wp = app.state::<WallpaperManager>();
-                        let _ = wp.toggle(app, None);
+                        let app_handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let wp = app_handle.state::<WallpaperManager>();
+                            let _ = wp.toggle(&app_handle, None);
+                        });
                     }
                     "toggle_fullscreen" => {
                         if let Some(window) = app.get_webview_window("main") {

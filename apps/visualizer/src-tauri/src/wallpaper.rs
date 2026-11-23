@@ -27,6 +27,7 @@ struct WallpaperState {
     mode_id: Option<String>,
     window_labels: Vec<String>,
     classic_workerw_hwnd: isize,
+    generation: u64,
 }
 
 pub struct WallpaperManager {
@@ -96,11 +97,17 @@ impl WallpaperManager {
                 }
             };
 
+            let gen = {
+                let mut guard = self.state.lock().map_err(|e| e.to_string())?;
+                guard.generation = guard.generation.wrapping_add(1);
+                guard.generation
+            };
+
             let host = win_wallpaper::resolve_desktop_host();
             let mut spawned_labels: Vec<String> = Vec::with_capacity(targets.len());
 
             for (idx, target) in targets.iter().enumerate() {
-                let label = format!("wallpaper-{idx}");
+                let label = format!("wallpaper-{gen}-{idx}");
                 let wp_win = WebviewWindowBuilder::new(
                     app,
                     &label,
@@ -116,7 +123,33 @@ impl WallpaperManager {
                 .build()
                 .map_err(|e| format!("Failed creating wallpaper window for {}: {e}", target.name))?;
 
-                if let Err(err) = win_wallpaper::attach_surface_to_desktop(&wp_win, target, host) {
+                // Move & size while still top-level so Windows delivers the target monitor's
+                // true DPI (e.g. 200% vs 100%) to WebView2 before reparenting as WS_CHILD.
+                let _ = wp_win.set_position(tauri::PhysicalPosition::new(target.x, target.y));
+                let _ = wp_win.set_size(tauri::PhysicalSize::new(
+                    target.width.max(1) as u32,
+                    target.height.max(1) as u32,
+                ));
+
+                // Execute Win32 SetParent/SetWindowPos strictly on the HWND's owning main UI thread.
+                let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+                let wp_win_main = wp_win.clone();
+                let target_main = target.clone();
+                app.run_on_main_thread(move || {
+                    let res = win_wallpaper::attach_surface_to_desktop(
+                        &wp_win_main,
+                        &target_main,
+                        host,
+                    );
+                    let _ = tx.send(res);
+                })
+                .map_err(|e| format!("Failed scheduling wallpaper attach on UI thread: {e}"))?;
+
+                let attach_res = rx
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .map_err(|_| "Timed out attaching wallpaper surface".to_string())?;
+
+                if let Err(err) = attach_res {
                     let _ = wp_win.destroy();
                     for prev in &spawned_labels {
                         if let Some(w) = app.get_webview_window(prev) {
@@ -251,7 +284,7 @@ mod win_wallpaper {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, FindWindowExW, FindWindowW, GetSystemMetrics, GetWindowLongPtrW,
-        GetWindowRect, SendMessageTimeoutW, SendMessageW, SetLayeredWindowAttributes, SetParent,
+        GetWindowRect, PostMessageW, SendMessageTimeoutW, SetLayeredWindowAttributes, SetParent,
         SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE, HWND_BOTTOM, HWND_TOP,
         LWA_ALPHA, SMTO_NORMAL, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
         SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOSENDCHANGING,
@@ -270,10 +303,10 @@ mod win_wallpaper {
         /// `SHELLDLL_DefView` is a direct child of `Progman`.
         /// We attach our layered child window directly to `Progman` and insert it strictly
         /// BEHIND `def_view` — never modifying or invalidating desktop icons.
-        RaisedProgman { progman: HWND, def_view: HWND },
+        RaisedProgman { progman: isize, def_view: isize },
         /// Classic Windows 10 & Windows 11 <=23H2:
         /// Standalone top-level `WorkerW` behind the `WorkerW` holding `SHELLDLL_DefView`.
-        ClassicWorkerW { workerw: HWND },
+        ClassicWorkerW { workerw: isize },
         /// Safe fallback if shell hides both layers.
         FallbackBottom,
     }
@@ -281,7 +314,7 @@ mod win_wallpaper {
     impl DesktopHost {
         pub fn classic_worker_raw(self) -> isize {
             match self {
-                DesktopHost::ClassicWorkerW { workerw } => workerw.0 as isize,
+                DesktopHost::ClassicWorkerW { workerw } => workerw,
                 _ => 0,
             }
         }
@@ -469,13 +502,18 @@ mod win_wallpaper {
 
             if let Some(def_view) = direct_def_view {
                 if is_raised || direct_worker.is_some() {
-                    return DesktopHost::RaisedProgman { progman, def_view };
+                    return DesktopHost::RaisedProgman {
+                        progman: progman.0 as isize,
+                        def_view: def_view.0 as isize,
+                    };
                 }
             }
 
             // 2. Check if a Classic WorkerW already exists (again, no 0x052C needed).
             if let Some(workerw) = find_existing_classic_workerw() {
-                return DesktopHost::ClassicWorkerW { workerw };
+                return DesktopHost::ClassicWorkerW {
+                    workerw: workerw.0 as isize,
+                };
             }
 
             // 3. Only on Win10 / Win11 <=23H2 where WorkerW has not been spawned yet:
@@ -493,7 +531,9 @@ mod win_wallpaper {
             thread::sleep(Duration::from_millis(40));
 
             if let Some(workerw) = find_existing_classic_workerw() {
-                return DesktopHost::ClassicWorkerW { workerw };
+                return DesktopHost::ClassicWorkerW {
+                    workerw: workerw.0 as isize,
+                };
             }
 
             // Re-check raised Progman if 0x052C spawned a child WorkerW under Progman.
@@ -501,7 +541,10 @@ mod win_wallpaper {
                 FindWindowExW(progman, HWND::default(), w!("SHELLDLL_DefView"), None)
             {
                 if !def_view.0.is_null() {
-                    return DesktopHost::RaisedProgman { progman, def_view };
+                    return DesktopHost::RaisedProgman {
+                        progman: progman.0 as isize,
+                        def_view: def_view.0 as isize,
+                    };
                 }
             }
 
@@ -520,24 +563,7 @@ mod win_wallpaper {
         let hwnd = HWND(raw_hwnd.0 as *mut c_void);
 
         unsafe {
-            // Step 1: While still top-level & hidden, place on the exact target monitor in physical
-            // pixels so Windows delivers the target monitor's real DPI (e.g. 200% vs 100%) to WebView2
-            // before reparenting as WS_CHILD (WS_CHILD windows do not receive WM_DPICHANGED).
-            let _ = SetWindowPos(
-                hwnd,
-                HWND_BOTTOM,
-                target.x,
-                target.y,
-                target.width,
-                target.height,
-                SWP_NOACTIVATE | SWP_NOSENDCHANGING,
-            );
-            let _ = window.set_size(tauri::PhysicalSize::new(
-                target.width.max(1) as u32,
-                target.height.max(1) as u32,
-            ));
-
-            // Step 2: Strip EVERY border/frame/edge style so zero invisible margin or shadow remains.
+            // Strip EVERY border/frame/edge style so zero invisible margin or shadow remains.
             let orig_style = GetWindowLongPtrW(hwnd, GWL_STYLE);
             let orig_ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
             let strip_style = (WS_CAPTION.0
@@ -556,6 +582,8 @@ mod win_wallpaper {
 
             match host {
                 DesktopHost::RaisedProgman { progman, def_view } => {
+                    let progman_hwnd = HWND(progman as *mut c_void);
+                    let def_view_hwnd = HWND(def_view as *mut c_void);
                     let clean_style = (orig_style & !strip_style)
                         | (WS_CHILD.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0 | WS_CLIPCHILDREN.0)
                             as isize;
@@ -565,17 +593,17 @@ mod win_wallpaper {
                     SetWindowLongPtrW(hwnd, GWL_STYLE, clean_style);
                     SetWindowLongPtrW(hwnd, GWL_EXSTYLE, clean_ex);
                     let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
-                    let _ = SetParent(hwnd, progman);
+                    let _ = SetParent(hwnd, progman_hwnd);
 
                     let mut parent_rect = RECT::default();
-                    let _ = GetWindowRect(progman, &mut parent_rect);
+                    let _ = GetWindowRect(progman_hwnd, &mut parent_rect);
                     let local_x = target.x - parent_rect.left;
                     let local_y = target.y - parent_rect.top;
 
                     // Insert strictly BEHIND `def_view` (desktop icons stay on top, 100% untouched).
                     let _ = SetWindowPos(
                         hwnd,
-                        def_view,
+                        def_view_hwnd,
                         local_x,
                         local_y,
                         target.width,
@@ -584,6 +612,7 @@ mod win_wallpaper {
                     );
                 }
                 DesktopHost::ClassicWorkerW { workerw } => {
+                    let workerw_hwnd = HWND(workerw as *mut c_void);
                     let clean_style = (orig_style & !strip_style)
                         | (WS_CHILD.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0 | WS_CLIPCHILDREN.0)
                             as isize;
@@ -592,10 +621,10 @@ mod win_wallpaper {
 
                     SetWindowLongPtrW(hwnd, GWL_STYLE, clean_style);
                     SetWindowLongPtrW(hwnd, GWL_EXSTYLE, clean_ex);
-                    let _ = SetParent(hwnd, workerw);
+                    let _ = SetParent(hwnd, workerw_hwnd);
 
                     let mut parent_rect = RECT::default();
-                    let _ = GetWindowRect(workerw, &mut parent_rect);
+                    let _ = GetWindowRect(workerw_hwnd, &mut parent_rect);
                     let local_x = target.x - parent_rect.left;
                     let local_y = target.y - parent_rect.top;
 
@@ -635,7 +664,7 @@ mod win_wallpaper {
             // width x height so Chromium fills every pixel edge-to-edge with zero borders.
             let packed_size = (((target.height as u16) as usize) << 16)
                 | ((target.width as u16) as usize);
-            let _ = SendMessageW(hwnd, WM_SIZE, WPARAM(0), LPARAM(packed_size as isize));
+            let _ = PostMessageW(hwnd, WM_SIZE, WPARAM(0), LPARAM(packed_size as isize));
         }
 
         Ok(())
@@ -647,7 +676,7 @@ mod win_wallpaper {
             unsafe {
                 let packed_size =
                     (((height as u16) as usize) << 16) | ((width as u16) as usize);
-                let _ = SendMessageW(hwnd, WM_SIZE, WPARAM(0), LPARAM(packed_size as isize));
+                let _ = PostMessageW(hwnd, WM_SIZE, WPARAM(0), LPARAM(packed_size as isize));
             }
         }
     }
