@@ -1,0 +1,244 @@
+//! Tauri v2 standalone Windows visualizer with WASAPI loopback FFT, System Tray, and Live Desktop Wallpaper mode.
+
+mod audio;
+mod wallpaper;
+
+use std::fs;
+use std::path::Path;
+
+use base64::Engine as _;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{Emitter, Manager, RunEvent, State, WebviewWindow};
+
+use crate::audio::{AudioDeviceInfo, AudioEngine, AudioStatus};
+use crate::wallpaper::{MonitorInfo, WallpaperManager};
+
+#[tauri::command]
+fn get_fft_frame(audio: State<'_, AudioEngine>) -> tauri::ipc::Response {
+    tauri::ipc::Response::new(audio.snapshot_bins())
+}
+
+#[tauri::command]
+fn get_audio_status(audio: State<'_, AudioEngine>) -> AudioStatus {
+    audio.get_status()
+}
+
+#[tauri::command]
+fn list_audio_devices(audio: State<'_, AudioEngine>) -> Vec<AudioDeviceInfo> {
+    audio.list_devices()
+}
+
+#[tauri::command]
+fn select_audio_device(audio: State<'_, AudioEngine>, device_id: Option<String>) {
+    audio.select_device(device_id);
+}
+
+#[tauri::command]
+fn list_monitors(wp: State<'_, WallpaperManager>) -> Vec<MonitorInfo> {
+    wp.list_monitors()
+}
+
+#[tauri::command]
+fn is_wallpaper_mode(wp: State<'_, WallpaperManager>) -> bool {
+    wp.is_active()
+}
+
+#[tauri::command]
+fn set_wallpaper_mode(
+    window: WebviewWindow,
+    wp: State<'_, WallpaperManager>,
+    enabled: bool,
+    monitor_id: Option<String>,
+) -> Result<bool, String> {
+    if enabled {
+        wp.enter(&window, monitor_id)
+    } else {
+        wp.exit(&window)
+    }
+}
+
+#[tauri::command]
+fn set_window_fullscreen(
+    window: WebviewWindow,
+    wp: State<'_, WallpaperManager>,
+    fullscreen: bool,
+) -> Result<bool, String> {
+    if wp.is_active() && fullscreen {
+        let _ = wp.exit(&window);
+    }
+    window
+        .set_fullscreen(fullscreen)
+        .map_err(|e| format!("Failed toggling fullscreen: {e}"))?;
+    window
+        .is_fullscreen()
+        .map_err(|e| format!("Failed reading fullscreen state: {e}"))
+}
+
+#[tauri::command]
+fn is_window_fullscreen(window: WebviewWindow) -> Result<bool, String> {
+    window
+        .is_fullscreen()
+        .map_err(|e| format!("Failed reading fullscreen state: {e}"))
+}
+
+#[tauri::command]
+fn load_image_as_data_url(path: String) -> Result<String, String> {
+    let img_path = Path::new(&path);
+    let data = fs::read(img_path).map_err(|e| format!("Failed reading image: {e}"))?;
+    if data.len() > 18 * 1024 * 1024 {
+        return Err("Image is larger than 18 MB. Please pick a smaller image.".to_string());
+    }
+    let mime = match img_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("gif") => "image/gif",
+        _ => return Err("Unsupported image format (use PNG, JPG, WebP, SVG, or GIF).".to_string()),
+    };
+    let b64 = base64::engine::general_purpose::STANDARD.encode(data);
+    Ok(format!("data:{mime};base64,{b64}"))
+}
+
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let wp = app.state::<WallpaperManager>();
+        let _ = wp.exit(&window);
+    }
+    let audio = app.state::<AudioEngine>();
+    audio.stop();
+    app.exit(0);
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            app.manage(AudioEngine::start());
+            app.manage(WallpaperManager::new());
+
+            let open_item = MenuItem::with_id(
+                app,
+                "open_studio",
+                "Open / Customize Studio",
+                true,
+                None::<&str>,
+            )?;
+            let wp_item = MenuItem::with_id(
+                app,
+                "toggle_wallpaper",
+                "Toggle Live Wallpaper Mode",
+                true,
+                None::<&str>,
+            )?;
+            let fs_item = MenuItem::with_id(
+                app,
+                "toggle_fullscreen",
+                "Toggle Fullscreen",
+                true,
+                None::<&str>,
+            )?;
+            let sep = PredefinedMenuItem::separator(app)?;
+            let quit_item =
+                MenuItem::with_id(app, "quit", "Quit T - Visualizer", true, None::<&str>)?;
+
+            let tray_menu =
+                Menu::with_items(app, &[&open_item, &wp_item, &fs_item, &sep, &quit_item])?;
+
+            let mut tray_builder = TrayIconBuilder::new()
+                .menu(&tray_menu)
+                .tooltip("T - Visualizer (Live Audio & Wallpaper)")
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "open_studio" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let wp = app.state::<WallpaperManager>();
+                            let _ = wp.exit(&window);
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                            let _ = window.emit("open-customize", ());
+                        }
+                    }
+                    "toggle_wallpaper" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let wp = app.state::<WallpaperManager>();
+                            let _ = wp.toggle(&window, None);
+                        }
+                    }
+                    "toggle_fullscreen" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let wp = app.state::<WallpaperManager>();
+                            if wp.is_active() {
+                                let _ = wp.exit(&window);
+                            }
+                            let next = !window.is_fullscreen().unwrap_or(false);
+                            let _ = window.set_fullscreen(next);
+                        }
+                    }
+                    "quit" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let wp = app.state::<WallpaperManager>();
+                            let _ = wp.exit(&window);
+                        }
+                        app.state::<AudioEngine>().stop();
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let wp = app.state::<WallpaperManager>();
+                            let _ = wp.exit(&window);
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                });
+
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray_builder = tray_builder.icon(icon);
+            }
+            let _ = tray_builder.build(app)?;
+
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_fft_frame,
+            get_audio_status,
+            list_audio_devices,
+            select_audio_device,
+            list_monitors,
+            is_wallpaper_mode,
+            set_wallpaper_mode,
+            set_window_fullscreen,
+            is_window_fullscreen,
+            load_image_as_data_url,
+            quit_app,
+        ])
+        .build(tauri::generate_context!())
+        .expect("error while building T - Visualizer");
+
+    app.run(|app_handle, event| {
+        if let RunEvent::Exit = event {
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let wp = app_handle.state::<WallpaperManager>();
+                let _ = wp.exit(&window);
+            }
+            app_handle.state::<AudioEngine>().stop();
+        }
+    });
+}

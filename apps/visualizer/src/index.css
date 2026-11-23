@@ -1,0 +1,88 @@
+@import "tailwindcss";
+
+:root {
+  --bg-base: #090a09;
+  --bg-elevated: #111311;
+  --bg-surface: #181b18;
+  --bg-hover: #212621;
+  --border-subtle: rgba(10, 249, 42, 0.14);
+  --text-primary: #f2f5f2;
+  --text-secondary: #a0b0a2;
+  --text-muted: #5e6e60;
+  --accent: #0af92a;
+  --accent-contrast: #061108;
+  --accent-soft: rgba(10, 249, 42, 0.14);
+  --viz-start: #0af92a;
+  --viz-end: #49ecc1;
+  --font-display: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+.font-mono-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+input[type="range"].t-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"].t-slider::-webkit-slider-runnable-track {
+  height: 5px;
+  border-radius: 9999px;
+}
+
+input[type="range"].t-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -3.5px;
+  border-radius: 9999px;
+  background: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  transition: transform 0.12s ease;
+}
+
+input[type="range"].t-slider:hover::-webkit-slider-thumb {
+  transform: scale(1.2);
+}
