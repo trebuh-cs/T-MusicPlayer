@@ -354,7 +354,13 @@ export const TrackList = memo(function TrackList({
       ) : (
         <div className="mt-3">
           {/* Column Header */}
-          <div className="grid grid-cols-[36px_minmax(0,2.2fr)_minmax(0,1.4fr)_84px_64px_72px] gap-3 px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+          <div
+            className={`grid ${
+              onReorderPlaylist
+                ? "grid-cols-[58px_minmax(0,2.2fr)_minmax(0,1.4fr)_84px_64px_72px]"
+                : "grid-cols-[36px_minmax(0,2.2fr)_minmax(0,1.4fr)_84px_64px_72px]"
+            } gap-3 px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)]`}
+          >
             <span className="text-center">#</span>
             <span>Title</span>
             <span className="hidden md:block">Album</span>
@@ -373,13 +379,17 @@ export const TrackList = memo(function TrackList({
                 <div
                   key={track.id}
                   draggable={Boolean(onReorderPlaylist)}
-                  onDragStart={() => {
+                  onDragStart={(e) => {
+                    if (!onReorderPlaylist) return;
+                    e.dataTransfer.effectAllowed = "move";
+                    e.dataTransfer.setData("text/plain", track.id);
                     setDragIndex(idx);
                     setDragOverIndex(idx);
                   }}
                   onDragOver={(e) => {
                     if (onReorderPlaylist) {
                       e.preventDefault();
+                      e.dataTransfer.dropEffect = "move";
                       if (dragOverIndex !== idx) setDragOverIndex(idx);
                     }
                   }}
@@ -387,9 +397,16 @@ export const TrackList = memo(function TrackList({
                     setDragIndex(null);
                     setDragOverIndex(null);
                   }}
-                  onDrop={() => handleDrop(idx)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    handleDrop(idx);
+                  }}
                   onDoubleClick={() => onPlayTrack(track, tracks)}
-                  className={`track-row-perf group relative grid grid-cols-[36px_minmax(0,2.2fr)_minmax(0,1.4fr)_84px_64px_72px] items-center gap-3 px-3 py-2 rounded-xl transition-colors ${
+                  className={`track-row-perf group relative grid ${
+                    onReorderPlaylist
+                      ? "grid-cols-[58px_minmax(0,2.2fr)_minmax(0,1.4fr)_84px_64px_72px]"
+                      : "grid-cols-[36px_minmax(0,2.2fr)_minmax(0,1.4fr)_84px_64px_72px]"
+                  } items-center gap-3 px-3 py-2 rounded-xl transition-colors ${
                     isActive
                       ? "bg-[var(--accent-soft)]"
                       : "hover:bg-[var(--bg-hover)]"
@@ -399,20 +416,24 @@ export const TrackList = memo(function TrackList({
                       : ""
                   }`}
                 >
-                  {/* Track Index / Drag Handle / Active Indicator */}
-                  <div className="flex items-center justify-center w-8 h-8">
+                  {/* Separate Drag Handle (when reorderable) + Track Index / Play Button */}
+                  <div className="flex items-center justify-center gap-0.5">
                     {onReorderPlaylist && (
-                      <GripVertical
-                        className="w-3.5 h-3.5 text-[var(--text-muted)] group-hover:hidden cursor-grab active:cursor-grabbing shrink-0"
-                        aria-hidden
-                      />
+                      <span
+                        title="Drag to reorder"
+                        onClick={(e) => e.stopPropagation()}
+                        className="flex items-center justify-center w-6 h-8 rounded-md text-[var(--text-muted)] hover:text-[var(--accent)] hover:bg-[var(--bg-surface)] cursor-grab active:cursor-grabbing shrink-0"
+                      >
+                        <GripVertical className="w-3.5 h-3.5" aria-hidden />
+                      </span>
                     )}
                     <button
                       type="button"
-                      onClick={() => onPlayTrack(track, tracks)}
-                      className={`flex items-center justify-center w-8 h-8 rounded-lg text-xs font-mono-num text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer ${
-                        onReorderPlaylist ? "hidden group-hover:flex" : ""
-                      }`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onPlayTrack(track, tracks);
+                      }}
+                      className="flex items-center justify-center w-7 h-8 rounded-lg text-xs font-mono-num text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer shrink-0"
                       aria-label={`Play ${track.title}`}
                     >
                       {isActive && isPlaying ? (
@@ -423,12 +444,8 @@ export const TrackList = memo(function TrackList({
                         </span>
                       ) : (
                         <>
-                          {!onReorderPlaylist && <span className="group-hover:hidden">{idx + 1}</span>}
-                          <Play
-                            className={`w-3.5 h-3.5 text-[var(--accent)] fill-current ${
-                              onReorderPlaylist ? "block" : "hidden group-hover:block"
-                            }`}
-                          />
+                          <span className="group-hover:hidden">{idx + 1}</span>
+                          <Play className="w-3.5 h-3.5 hidden group-hover:block text-[var(--accent)] fill-current" />
                         </>
                       )}
                     </button>
