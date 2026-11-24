@@ -56,6 +56,17 @@ impl WallpaperManager {
         }
     }
 
+    pub fn list_physical_monitors(&self) -> Vec<MonitorInfo> {
+        #[cfg(windows)]
+        {
+            win_wallpaper::enumerate_physical_monitors()
+        }
+        #[cfg(not(windows))]
+        {
+            Vec::new()
+        }
+    }
+
     /// Enter (or reconfigure) Live Desktop Wallpaper mode using dedicated borderless child windows.
     /// Must be invoked off the UI main thread (e.g. `async fn` command or async runtime task)
     /// because `WebviewWindowBuilder::build()` dispatches synchronously onto the Windows UI loop.

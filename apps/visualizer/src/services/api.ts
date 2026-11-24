@@ -4,6 +4,7 @@ import type {
   AudioStatus,
   MonitorInfo,
   NowPlayingMedia,
+  PresenterStatus,
 } from "../types";
 
 export const api = {
@@ -64,6 +65,19 @@ export const api = {
 
   launchedInWallpaperAutostart: () =>
     invoke<boolean>("launched_in_wallpaper_autostart"),
+
+  getPresenterStatus: () => invoke<PresenterStatus>("get_presenter_status"),
+
+  setPresenterMode: (
+    enabled: boolean,
+    monitorId: string | null,
+    alwaysOnTop = true
+  ) =>
+    invoke<PresenterStatus>("set_presenter_mode", {
+      enabled,
+      monitorId,
+      alwaysOnTop,
+    }),
 
   hideMainWindow: () => invoke<void>("hide_main_window"),
 

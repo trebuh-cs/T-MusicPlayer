@@ -5,6 +5,7 @@ import {
   Maximize2,
   Minimize2,
   Minus,
+  Projector,
   SlidersHorizontal,
   Wallpaper,
   X,
@@ -22,12 +23,14 @@ import {
   type AudioStatus,
   type MonitorInfo,
   type NowPlayingMedia,
+  type PresenterStatus,
   type SavedVisualizerTheme,
   type VisualizerConfig,
 } from "./types";
 
 const STORAGE_KEY = "t_visualizer_config_v1";
 const PRESETS_STORAGE_KEY = "t_visualizer_saved_themes_v1";
+const PRESENTER_PREFS_KEY = "t_visualizer_presenter_prefs_v1";
 
 function loadSavedConfig(): VisualizerConfig {
   try {
@@ -50,23 +53,51 @@ function loadSavedThemes(): SavedVisualizerTheme[] {
   }
 }
 
-function isWallpaperSurfaceWindow(): boolean {
+function getSurfaceKind(): "wallpaper" | "presenter" | null {
   try {
-    return new URLSearchParams(window.location.search).get("wallpaper") === "1";
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("wallpaper") === "1") return "wallpaper";
+    if (params.get("presenter") === "1") return "presenter";
+    return null;
   } catch {
-    return false;
+    return null;
+  }
+}
+
+function loadPresenterPrefs(): { monitorId: string | null; alwaysOnTop: boolean } {
+  try {
+    const raw = localStorage.getItem(PRESENTER_PREFS_KEY);
+    if (!raw) return { monitorId: null, alwaysOnTop: true };
+    const parsed = JSON.parse(raw) as { monitorId?: string | null; alwaysOnTop?: boolean };
+    return {
+      monitorId: typeof parsed.monitorId === "string" ? parsed.monitorId : null,
+      alwaysOnTop: parsed.alwaysOnTop !== false,
+    };
+  } catch {
+    return { monitorId: null, alwaysOnTop: true };
   }
 }
 
 /**
- * Pure full-bleed wallpaper surface rendered on each individual monitor in Live Wallpaper Mode.
+ * Pure full-bleed surface rendered on each Wallpaper monitor OR on the Beamer/Stage Presenter monitor.
  * Zero HUD, zero margins, synced live with the main Customize Studio & Windows GSMTC Now Playing.
  */
-function WallpaperSurfaceApp() {
+function OutputSurfaceApp({ kind }: { kind: "wallpaper" | "presenter" }) {
   const [config, setConfig] = useState<VisualizerConfig>(() => loadSavedConfig());
   const [hasAudioSignal, setHasAudioSignal] = useState(false);
   const [nowPlaying, setNowPlaying] = useState<NowPlayingMedia | null>(null);
   const liveFftRef = useRef<Uint8Array>(new Uint8Array(256));
+
+  useEffect(() => {
+    if (kind !== "presenter") return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        void api.setPresenterMode(false, null, true).catch(() => {});
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [kind]);
 
   useEffect(() => {
     applyThemeToDocument(getThemeById(config.themeId));
@@ -174,7 +205,11 @@ function WallpaperSurfaceApp() {
   }, []);
 
   return (
-    <div className="fixed inset-0 w-screen h-screen overflow-hidden bg-[var(--bg-base)] select-none">
+    <div
+      className={`fixed inset-0 w-screen h-screen overflow-hidden bg-[var(--bg-base)] select-none ${
+        kind === "presenter" ? "cursor-none" : ""
+      }`}
+    >
       <CircularVisualizerCanvas
         config={config}
         liveFftRef={liveFftRef}
@@ -194,6 +229,13 @@ function MainApp() {
   const [studioOpen, setStudioOpen] = useState(false);
   const [wallpaperMode, setWallpaperMode] = useState(false);
   const [autostartWallpaper, setAutostartWallpaper] = useState(false);
+  const [presenterStatus, setPresenterStatus] = useState<PresenterStatus>({
+    active: false,
+    monitor_id: null,
+    monitor_name: null,
+    always_on_top: true,
+  });
+  const [presenterPrefs, setPresenterPrefs] = useState(() => loadPresenterPrefs());
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [hudVisible, setHudVisible] = useState(true);
   const [audioStatus, setAudioStatus] = useState<AudioStatus | null>(null);
@@ -253,15 +295,17 @@ function MainApp() {
 
   const refreshHardware = useCallback(async () => {
     try {
-      const [devs, mons, wpActive, fsActive, status, media, autoWp] = await Promise.all([
-        api.listAudioDevices(),
-        api.listMonitors(),
-        api.isWallpaperMode(),
-        api.isWindowFullscreen(),
-        api.getAudioStatus(),
-        api.getNowPlaying(),
-        api.getAutostartWallpaper(),
-      ]);
+      const [devs, mons, wpActive, fsActive, status, media, autoWp, presSt] =
+        await Promise.all([
+          api.listAudioDevices(),
+          api.listMonitors(),
+          api.isWallpaperMode(),
+          api.isWindowFullscreen(),
+          api.getAudioStatus(),
+          api.getNowPlaying(),
+          api.getAutostartWallpaper(),
+          api.getPresenterStatus(),
+        ]);
       setDevices(devs);
       setMonitors(mons);
       setWallpaperMode(wpActive);
@@ -269,10 +313,82 @@ function MainApp() {
       setAudioStatus(status);
       setNowPlaying(media);
       setAutostartWallpaper(autoWp);
+      setPresenterStatus(presSt);
     } catch {
       // Ignore during initial mount
     }
   }, []);
+
+  const savePresenterPrefs = useCallback(
+    (next: { monitorId: string | null; alwaysOnTop: boolean }) => {
+      setPresenterPrefs(next);
+      try {
+        localStorage.setItem(PRESENTER_PREFS_KEY, JSON.stringify(next));
+      } catch {
+        // Ignore
+      }
+    },
+    []
+  );
+
+  const handleTogglePresenter = useCallback(async () => {
+    try {
+      const target = !presenterStatus.active;
+      await api.syncVisualizerConfig(JSON.stringify(configRef.current));
+      const next = await api.setPresenterMode(
+        target,
+        presenterPrefs.monitorId,
+        presenterPrefs.alwaysOnTop
+      );
+      setPresenterStatus(next);
+      if (next.active) {
+        showToast(
+          `Beamer Output live on ${next.monitor_name ?? "external screen"} — tweak Studio or control Spotify freely!`
+        );
+      } else {
+        showToast("Beamer / Stage Output closed");
+      }
+    } catch (err) {
+      showToast(`Beamer Output error: ${String(err)}`);
+    }
+  }, [presenterStatus.active, presenterPrefs, showToast]);
+
+  const handleSelectPresenterMonitor = useCallback(
+    async (monitorId: string | null) => {
+      const nextPrefs = { ...presenterPrefs, monitorId };
+      savePresenterPrefs(nextPrefs);
+      if (!presenterStatus.active) return;
+      try {
+        await api.syncVisualizerConfig(JSON.stringify(configRef.current));
+        const next = await api.setPresenterMode(true, monitorId, nextPrefs.alwaysOnTop);
+        setPresenterStatus(next);
+        showToast(`Beamer Output moved to ${next.monitor_name ?? "display"}`);
+      } catch (err) {
+        showToast(`Beamer Output error: ${String(err)}`);
+      }
+    },
+    [presenterPrefs, presenterStatus.active, savePresenterPrefs, showToast]
+  );
+
+  const handleTogglePresenterOnTop = useCallback(async () => {
+    const nextPrefs = {
+      ...presenterPrefs,
+      alwaysOnTop: !presenterPrefs.alwaysOnTop,
+    };
+    savePresenterPrefs(nextPrefs);
+    if (!presenterStatus.active) return;
+    try {
+      await api.syncVisualizerConfig(JSON.stringify(configRef.current));
+      const next = await api.setPresenterMode(
+        true,
+        nextPrefs.monitorId,
+        nextPrefs.alwaysOnTop
+      );
+      setPresenterStatus(next);
+    } catch (err) {
+      showToast(`Beamer Output error: ${String(err)}`);
+    }
+  }, [presenterPrefs, presenterStatus.active, savePresenterPrefs, showToast]);
 
   const handleToggleAutostartWallpaper = useCallback(async () => {
     try {
@@ -330,6 +446,7 @@ function MainApp() {
   useEffect(() => {
     let unlistenWp: (() => void) | null = null;
     let unlistenStudio: (() => void) | null = null;
+    let unlistenPres: (() => void) | null = null;
 
     void listen<boolean>("wallpaper-mode-changed", (event) => {
       const active = Boolean(event.payload);
@@ -339,6 +456,14 @@ function MainApp() {
       }
     }).then((fn) => {
       unlistenWp = fn;
+    });
+
+    void listen<PresenterStatus>("presenter-mode-changed", (event) => {
+      if (event.payload) {
+        setPresenterStatus(event.payload);
+      }
+    }).then((fn) => {
+      unlistenPres = fn;
     });
 
     void listen("open-customize", () => {
@@ -351,6 +476,7 @@ function MainApp() {
 
     return () => {
       unlistenWp?.();
+      unlistenPres?.();
       unlistenStudio?.();
     };
   }, [refreshHardware]);
@@ -627,6 +753,38 @@ function MainApp() {
         <div className="flex items-center gap-1.5 shrink-0">
           <button
             type="button"
+            onClick={() => void handleTogglePresenter()}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer"
+            style={
+              presenterStatus.active
+                ? {
+                    background: "var(--accent)",
+                    color: "var(--accent-contrast)",
+                  }
+                : {
+                    background: "var(--bg-surface)",
+                    color: "var(--text-primary)",
+                    border: "1px solid var(--border-subtle)",
+                  }
+            }
+            title={
+              presenterStatus.active
+                ? `Stop Beamer Output (${presenterStatus.monitor_name ?? "External Display"})`
+                : "Open dedicated fullscreen Beamer / Stage Output on external display"
+            }
+          >
+            <Projector
+              className={`w-3.5 h-3.5 ${
+                presenterStatus.active ? "" : "text-[var(--accent)]"
+              }`}
+            />
+            <span className="hidden md:inline">
+              {presenterStatus.active ? "Stop Beamer" : "Beamer Mode"}
+            </span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => void handleToggleWallpaper()}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer"
             style={
@@ -720,6 +878,12 @@ function MainApp() {
           wallpaperMode={wallpaperMode}
           autostartWallpaper={autostartWallpaper}
           onToggleAutostartWallpaper={() => void handleToggleAutostartWallpaper()}
+          presenterStatus={presenterStatus}
+          presenterMonitorId={presenterPrefs.monitorId}
+          presenterAlwaysOnTop={presenterPrefs.alwaysOnTop}
+          onTogglePresenter={() => void handleTogglePresenter()}
+          onSelectPresenterMonitor={(id) => void handleSelectPresenterMonitor(id)}
+          onTogglePresenterOnTop={() => void handleTogglePresenterOnTop()}
           liveFftRef={liveFftRef}
           hasAudioSignal={hasAudioSignal}
           audioStatus={audioStatus}
@@ -736,5 +900,6 @@ function MainApp() {
 }
 
 export default function App() {
-  return isWallpaperSurfaceWindow() ? <WallpaperSurfaceApp /> : <MainApp />;
+  const surfaceKind = getSurfaceKind();
+  return surfaceKind ? <OutputSurfaceApp kind={surfaceKind} /> : <MainApp />;
 }

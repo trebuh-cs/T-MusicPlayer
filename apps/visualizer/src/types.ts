@@ -23,3 +23,10 @@ export interface MonitorInfo {
   height: number;
   is_primary: boolean;
 }
+
+export interface PresenterStatus {
+  active: boolean;
+  monitor_id: string | null;
+  monitor_name: string | null;
+  always_on_top: boolean;
+}

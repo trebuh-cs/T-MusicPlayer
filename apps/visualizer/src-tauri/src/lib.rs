@@ -5,6 +5,7 @@
 mod audio;
 mod autostart;
 mod media;
+mod presenter;
 mod wallpaper;
 
 use std::fs;
@@ -18,6 +19,7 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewWindow};
 
 use crate::audio::{AudioDeviceInfo, AudioEngine, AudioStatus};
 use crate::media::{MediaTracker, NowPlayingMedia};
+use crate::presenter::{PresenterManager, PresenterStatus};
 use crate::wallpaper::{MonitorInfo, WallpaperManager};
 
 struct SyncedConfigState(Mutex<Option<String>>);
@@ -161,6 +163,26 @@ fn launched_in_wallpaper_autostart() -> bool {
 }
 
 #[tauri::command]
+fn get_presenter_status(pres: State<'_, PresenterManager>) -> PresenterStatus {
+    pres.status()
+}
+
+#[tauri::command]
+async fn set_presenter_mode(
+    app: AppHandle,
+    pres: State<'_, PresenterManager>,
+    enabled: bool,
+    monitor_id: Option<String>,
+    always_on_top: Option<bool>,
+) -> Result<PresenterStatus, String> {
+    if enabled {
+        pres.enter(&app, monitor_id, always_on_top.unwrap_or(true))
+    } else {
+        pres.exit(&app)
+    }
+}
+
+#[tauri::command]
 fn hide_main_window(app: AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
@@ -171,6 +193,8 @@ fn hide_main_window(app: AppHandle) {
 fn quit_app(app: AppHandle) {
     let wp = app.state::<WallpaperManager>();
     let _ = wp.exit(&app, false);
+    let pres = app.state::<PresenterManager>();
+    let _ = pres.exit(&app);
     app.state::<AudioEngine>().stop();
     app.state::<MediaTracker>().stop();
     app.exit(0);
@@ -184,6 +208,7 @@ pub fn run() {
             app.manage(AudioEngine::start());
             app.manage(MediaTracker::start());
             app.manage(WallpaperManager::new());
+            app.manage(PresenterManager::new());
             app.manage(SyncedConfigState(Mutex::new(None)));
 
             let open_item = MenuItem::with_id(
@@ -200,6 +225,13 @@ pub fn run() {
                 true,
                 None::<&str>,
             )?;
+            let pres_item = MenuItem::with_id(
+                app,
+                "toggle_presenter",
+                "Toggle Beamer / Stage Output",
+                true,
+                None::<&str>,
+            )?;
             let fs_item = MenuItem::with_id(
                 app,
                 "toggle_fullscreen",
@@ -211,8 +243,10 @@ pub fn run() {
             let quit_item =
                 MenuItem::with_id(app, "quit", "Quit T - Visualizer", true, None::<&str>)?;
 
-            let tray_menu =
-                Menu::with_items(app, &[&open_item, &wp_item, &fs_item, &sep, &quit_item])?;
+            let tray_menu = Menu::with_items(
+                app,
+                &[&open_item, &wp_item, &pres_item, &fs_item, &sep, &quit_item],
+            )?;
 
             let mut tray_builder = TrayIconBuilder::new()
                 .menu(&tray_menu)
@@ -233,6 +267,13 @@ pub fn run() {
                             let _ = wp.toggle(&app_handle, None);
                         });
                     }
+                    "toggle_presenter" => {
+                        let app_handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let pres = app_handle.state::<PresenterManager>();
+                            let _ = pres.toggle(&app_handle, None);
+                        });
+                    }
                     "toggle_fullscreen" => {
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
@@ -244,6 +285,8 @@ pub fn run() {
                     "quit" => {
                         let wp = app.state::<WallpaperManager>();
                         let _ = wp.exit(app, false);
+                        let pres = app.state::<PresenterManager>();
+                        let _ = pres.exit(app);
                         app.state::<AudioEngine>().stop();
                         app.state::<MediaTracker>().stop();
                         app.exit(0);
@@ -301,6 +344,8 @@ pub fn run() {
             get_autostart_wallpaper,
             set_autostart_wallpaper,
             launched_in_wallpaper_autostart,
+            get_presenter_status,
+            set_presenter_mode,
             hide_main_window,
             quit_app,
         ])
@@ -311,6 +356,8 @@ pub fn run() {
         if let RunEvent::Exit = event {
             let wp = app_handle.state::<WallpaperManager>();
             let _ = wp.exit(app_handle, false);
+            let pres = app_handle.state::<PresenterManager>();
+            let _ = pres.exit(app_handle);
             app_handle.state::<AudioEngine>().stop();
             app_handle.state::<MediaTracker>().stop();
         }

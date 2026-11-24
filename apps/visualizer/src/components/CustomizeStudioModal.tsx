@@ -8,6 +8,7 @@ import {
   Monitor,
   Music2,
   Palette,
+  Projector,
   RefreshCw,
   RotateCcw,
   Sliders,
@@ -38,6 +39,7 @@ import {
   type MonitorInfo,
   type NowPlayingMedia,
   type ParticleShape,
+  type PresenterStatus,
   type SavedVisualizerTheme,
   type SynthwaveDrawStyle,
   type SynthwaveMode,
@@ -65,6 +67,12 @@ interface CustomizeStudioModalProps {
   wallpaperMode: boolean;
   autostartWallpaper: boolean;
   onToggleAutostartWallpaper: () => void;
+  presenterStatus: PresenterStatus;
+  presenterMonitorId: string | null;
+  presenterAlwaysOnTop: boolean;
+  onTogglePresenter: () => void;
+  onSelectPresenterMonitor: (monitorId: string | null) => void;
+  onTogglePresenterOnTop: () => void;
   liveFftRef: React.RefObject<Uint8Array>;
   hasAudioSignal: boolean;
   audioStatus: AudioStatus | null;
@@ -172,6 +180,12 @@ export function CustomizeStudioModal({
   wallpaperMode,
   autostartWallpaper,
   onToggleAutostartWallpaper,
+  presenterStatus,
+  presenterMonitorId,
+  presenterAlwaysOnTop,
+  onTogglePresenter,
+  onSelectPresenterMonitor,
+  onTogglePresenterOnTop,
   liveFftRef,
   hasAudioSignal,
   audioStatus,
@@ -347,6 +361,32 @@ export function CustomizeStudioModal({
             >
               <RotateCcw className="w-3.5 h-3.5" />
               Reset
+            </button>
+
+            <button
+              type="button"
+              onClick={onTogglePresenter}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer"
+              style={
+                presenterStatus.active
+                  ? {
+                      background: "var(--accent)",
+                      color: "var(--accent-contrast)",
+                    }
+                  : {
+                      background: "var(--bg-surface)",
+                      color: "var(--text-primary)",
+                      border: "1px solid var(--border-subtle)",
+                    }
+              }
+              title="Dedicated fullscreen Beamer / Stage output on external monitor"
+            >
+              <Projector
+                className={`w-3.5 h-3.5 ${
+                  presenterStatus.active ? "" : "text-[var(--accent)]"
+                }`}
+              />
+              {presenterStatus.active ? "Stop Beamer" : "Beamer Output"}
             </button>
 
             <button
@@ -1681,6 +1721,79 @@ export function CustomizeStudioModal({
                         checked={autostartWallpaper}
                         onToggle={onToggleAutostartWallpaper}
                       />
+                    </div>
+                  </section>
+
+                  {/* Beamer / Presenter Stage Output Mode */}
+                  <section className="space-y-3 pt-4 border-t border-[var(--border-subtle)]">
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)] flex items-center gap-1.5">
+                        <Projector className="w-3.5 h-3.5 text-[var(--accent)]" />
+                        Beamer / Presenter Mode (Stage Output)
+                      </h3>
+                      <span className="text-[10px] font-semibold text-[var(--accent)]">
+                        {presenterStatus.active
+                          ? `LIVE: ${presenterStatus.monitor_name ?? "External"}`
+                          : "Standby"}
+                      </span>
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] space-y-2.5">
+                      <p className="text-[11px] text-[var(--text-secondary)] leading-relaxed">
+                        Opens a pure, borderless fullscreen visualizer on your Beamer / external
+                        display while you stay in Customize Studio or control Spotify on your main
+                        screen. All edits update the Beamer live!
+                      </p>
+
+                      <label className="block space-y-1">
+                        <span className="text-[11px] text-[var(--text-secondary)]">
+                          Beamer / External Target Display
+                        </span>
+                        <select
+                          value={presenterMonitorId ?? ""}
+                          onChange={(e) => onSelectPresenterMonitor(e.target.value || null)}
+                          className="w-full px-3 py-2 rounded-lg text-xs bg-[var(--bg-base)] border border-[var(--border-subtle)] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+                        >
+                          <option value="">Auto (First External / Beamer Display)</option>
+                          {monitors
+                            .filter((m) => m.id !== "mirrored" && m.id !== "span")
+                            .map((m) => (
+                              <option key={m.id} value={m.id}>
+                                {m.name} {m.is_primary ? "(Primary)" : "(External)"}
+                              </option>
+                            ))}
+                        </select>
+                      </label>
+
+                      <ToggleRow
+                        label="Keep Beamer Always on Top"
+                        description="Prevents Windows taskbar or popups from appearing over the Beamer"
+                        checked={presenterAlwaysOnTop}
+                        onToggle={onTogglePresenterOnTop}
+                      />
+
+                      <button
+                        type="button"
+                        onClick={onTogglePresenter}
+                        className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer"
+                        style={
+                          presenterStatus.active
+                            ? {
+                                background: "var(--bg-base)",
+                                color: "var(--accent)",
+                                border: "1px solid var(--accent)",
+                              }
+                            : {
+                                background: "var(--accent)",
+                                color: "var(--accent-contrast)",
+                              }
+                        }
+                      >
+                        <Projector className="w-3.5 h-3.5" />
+                        {presenterStatus.active
+                          ? "Stop Beamer Output"
+                          : "Start Fullscreen Beamer Output"}
+                      </button>
                     </div>
                   </section>
 

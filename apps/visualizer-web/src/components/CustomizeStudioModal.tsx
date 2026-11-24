@@ -1,13 +1,18 @@
 import { useState } from "react";
 import {
   BookmarkPlus,
+  Check,
+  Copy,
   Download,
+  Eye,
+  EyeOff,
   ImagePlus,
   Layers,
   Mic,
   MicOff,
   Music2,
   Palette,
+  Projector,
   Radio,
   RefreshCw,
   RotateCcw,
@@ -26,6 +31,7 @@ import {
   serializeThemePreset,
 } from "@shared/visualizer/presets";
 import { downloadTextFile, pickImageAsDataUrl, pickTextFile } from "../services/fileIO";
+import { getProjectorUrl } from "../services/stageSync";
 import { THEMES } from "../themes";
 import {
   DEFAULT_VISUALIZER_CONFIG,
@@ -86,6 +92,11 @@ interface CustomizeStudioModalProps {
   onToggleWakeLock: () => void;
   snapEnabled: boolean;
   onToggleSnap: () => void;
+  connectedProjectors: number;
+  blackout: boolean;
+  onOpenBeamer: () => void;
+  onCloseBeamer: () => void;
+  onToggleBlackout: () => void;
 }
 
 interface SliderRowProps {
@@ -203,10 +214,16 @@ export function CustomizeStudioModal({
   onToggleWakeLock,
   snapEnabled,
   onToggleSnap,
+  connectedProjectors,
+  blackout,
+  onOpenBeamer,
+  onCloseBeamer,
+  onToggleBlackout,
 }: CustomizeStudioModalProps) {
   const [activeTab, setActiveTab] = useState<StudioTab>(initialTab);
   const [simulatePreview, setSimulatePreview] = useState(true);
   const [presetName, setPresetName] = useState("");
+  const [copiedProjUrl, setCopiedProjUrl] = useState(false);
   const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
 
   const patch = <K extends keyof VisualizerConfig>(key: K, val: VisualizerConfig[K]) => {
@@ -347,6 +364,31 @@ export function CustomizeStudioModal({
             >
               <RotateCcw className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Reset</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onOpenBeamer}
+              className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer"
+              style={
+                connectedProjectors > 0
+                  ? {
+                      background: "var(--bg-surface)",
+                      color: "var(--accent)",
+                      border: "1px solid var(--accent)",
+                    }
+                  : {
+                      background: "var(--bg-surface)",
+                      color: "var(--text-primary)",
+                      border: "1px solid var(--border-subtle)",
+                    }
+              }
+              title="Open dedicated fullscreen Beamer / Stage Projector window"
+            >
+              <Projector className="w-3.5 h-3.5 text-[var(--accent)]" />
+              {connectedProjectors > 0
+                ? `Beamer Live (${connectedProjectors})`
+                : "Beamer Output"}
             </button>
 
             <button
@@ -1771,6 +1813,108 @@ export function CustomizeStudioModal({
                           onToggle={onToggleWakeLock}
                         />
                       )}
+                    </div>
+                  </section>
+
+                  {/* Beamer / Stage Projector Mode */}
+                  <section className="space-y-3 pt-4 border-t border-[var(--border-subtle)]">
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)] flex items-center gap-1.5">
+                        <Projector className="w-3.5 h-3.5 text-[var(--accent)]" />
+                        Beamer / Presenter Mode (Stage Output)
+                      </h3>
+                      <span className="text-[10px] font-semibold text-[var(--accent)]">
+                        {connectedProjectors > 0
+                          ? `LIVE (${connectedProjectors} connected)`
+                          : "Standby"}
+                      </span>
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] space-y-2.5">
+                      <p className="text-[11px] text-[var(--text-secondary)] leading-relaxed">
+                        Opens a clean, zero-HUD fullscreen Beamer output synced live (60fps audio,
+                        theme edits &amp; Spotify track) while you adjust settings or control
+                        Spotify on your iPad / laptop screen. Works on Desktop multi-screen &amp;
+                        iPad External Display (Stage Manager, M1+).
+                      </p>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={onOpenBeamer}
+                          className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer"
+                          style={{
+                            background: "var(--accent)",
+                            color: "var(--accent-contrast)",
+                          }}
+                        >
+                          <Projector className="w-3.5 h-3.5" />
+                          {connectedProjectors > 0
+                            ? "Open Another Beamer Window"
+                            : "Open Fullscreen Beamer Window"}
+                        </button>
+
+                        {connectedProjectors > 0 && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={onToggleBlackout}
+                              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border cursor-pointer ${
+                                blackout
+                                  ? "bg-rose-500/20 border-rose-500/50 text-rose-300"
+                                  : "bg-[var(--bg-base)] border-[var(--border-subtle)] text-[var(--text-primary)]"
+                              }`}
+                            >
+                              {blackout ? (
+                                <>
+                                  <EyeOff className="w-3.5 h-3.5" />
+                                  Blackout ON
+                                </>
+                              ) : (
+                                <>
+                                  <Eye className="w-3.5 h-3.5" />
+                                  Blackout
+                                </>
+                              )}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={onCloseBeamer}
+                              className="px-3 py-2 rounded-lg text-xs font-medium bg-[var(--bg-base)] hover:bg-rose-500/20 border border-[var(--border-subtle)] text-rose-400 cursor-pointer"
+                            >
+                              Close
+                            </button>
+                          </>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        <code className="flex-1 px-2 py-1.5 rounded bg-[var(--bg-base)] border border-[var(--border-subtle)] text-[10px] font-mono-num text-[var(--text-secondary)] truncate select-all">
+                          {getProjectorUrl()}
+                        </code>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void navigator.clipboard?.writeText(getProjectorUrl()).then(() => {
+                              setCopiedProjUrl(true);
+                              window.setTimeout(() => setCopiedProjUrl(false), 2000);
+                            });
+                          }}
+                          className="flex items-center gap-1 px-2.5 py-1.5 rounded bg-[var(--bg-base)] hover:bg-[var(--bg-hover)] border border-[var(--border-subtle)] text-[10px] font-medium text-[var(--text-primary)] cursor-pointer shrink-0"
+                        >
+                          {copiedProjUrl ? (
+                            <>
+                              <Check className="w-3 h-3 text-[var(--accent)]" />
+                              Copied
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3 h-3" />
+                              Copy URL
+                            </>
+                          )}
+                        </button>
+                      </div>
                     </div>
                   </section>
 

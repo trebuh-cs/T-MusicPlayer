@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  Eye,
+  EyeOff,
   Maximize2,
   Mic,
   MicOff,
   Minimize2,
   Music2,
+  Projector,
   SlidersHorizontal,
   Sparkles,
   Sun,
@@ -15,6 +18,7 @@ import tpxLogoUrl from "./assets/tpx-logo.svg";
 import { CircularVisualizerCanvas } from "./components/CircularVisualizerCanvas";
 import { CustomizeStudioModal } from "./components/CustomizeStudioModal";
 import { NowPlayingOverlay } from "./components/NowPlayingOverlay";
+import { ProjectorSurfaceApp } from "./components/ProjectorSurfaceApp";
 import { pickTextFile } from "./services/fileIO";
 import {
   disconnectSpotify,
@@ -25,6 +29,12 @@ import {
   saveSpotifyClientId,
   startSpotifyLogin,
 } from "./services/spotify";
+import {
+  createStageChannel,
+  isProjectorWindow,
+  openProjectorWindow,
+  type StageSyncMessage,
+} from "./services/stageSync";
 import { ScreenWakeLockController } from "./services/wakeLock";
 import { WebAudioCaptureEngine } from "./services/webAudio";
 import { applyThemeToDocument, getThemeById } from "./themes";
@@ -88,7 +98,7 @@ function isStandalonePwa(): boolean {
   );
 }
 
-export default function App() {
+function ControlDeckApp() {
   const [config, setConfig] = useState<VisualizerConfig>(() => loadSavedConfig());
   const [savedThemes, setSavedThemes] = useState<SavedVisualizerTheme[]>(() =>
     loadSavedThemes()
@@ -100,6 +110,14 @@ export default function App() {
   const [hudVisible, setHudVisible] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [snapEnabled, setSnapEnabled] = useState(true);
+  const [connectedProjectors, setConnectedProjectors] = useState(0);
+  const [blackout, setBlackout] = useState(false);
+
+  const stageChannelRef = useRef<BroadcastChannel | null>(null);
+  const projectorPeersRef = useRef<Map<string, number>>(new Map());
+  const projectorWinRef = useRef<Window | null>(null);
+  const connectedProjectorsRef = useRef(0);
+  connectedProjectorsRef.current = connectedProjectors;
 
   const audioEngineRef = useRef<WebAudioCaptureEngine | null>(null);
   if (!audioEngineRef.current) {
@@ -140,6 +158,67 @@ export default function App() {
   const toastTimerRef = useRef<number | null>(null);
   const configRef = useRef(config);
   configRef.current = config;
+  const nowPlayingRef = useRef(nowPlaying);
+  nowPlayingRef.current = nowPlaying;
+  const hasAudioSignalRef = useRef(hasAudioSignal);
+  hasAudioSignalRef.current = hasAudioSignal;
+  const blackoutRef = useRef(blackout);
+  blackoutRef.current = blackout;
+
+  const broadcastStateSnapshot = useCallback(() => {
+    stageChannelRef.current?.postMessage({
+      type: "state-sync",
+      config: configRef.current,
+      nowPlaying: nowPlayingRef.current,
+      hasAudioSignal: hasAudioSignalRef.current,
+      blackout: blackoutRef.current,
+    } satisfies StageSyncMessage);
+  }, []);
+
+  // BroadcastChannel stage sync for Beamer / Presenter Output windows
+  useEffect(() => {
+    const channel = createStageChannel();
+    stageChannelRef.current = channel;
+    if (!channel) return;
+
+    const syncPeerCount = () => {
+      const now = Date.now();
+      for (const [id, lastSeen] of projectorPeersRef.current.entries()) {
+        if (now - lastSeen > 7500) {
+          projectorPeersRef.current.delete(id);
+        }
+      }
+      setConnectedProjectors(projectorPeersRef.current.size);
+    };
+
+    channel.onmessage = (event: MessageEvent<StageSyncMessage>) => {
+      const msg = event.data;
+      if (!msg || typeof msg !== "object") return;
+      if (msg.type === "projector-hello") {
+        projectorPeersRef.current.set(msg.id, Date.now());
+        syncPeerCount();
+        broadcastStateSnapshot();
+      } else if (msg.type === "projector-heartbeat") {
+        projectorPeersRef.current.set(msg.id, Date.now());
+        syncPeerCount();
+      } else if (msg.type === "projector-bye") {
+        projectorPeersRef.current.delete(msg.id);
+        syncPeerCount();
+      }
+    };
+
+    const pruneId = window.setInterval(syncPeerCount, 3000);
+    return () => {
+      window.clearInterval(pruneId);
+      channel.close();
+      stageChannelRef.current = null;
+    };
+  }, [broadcastStateSnapshot]);
+
+  // Push live state updates whenever config, Spotify track, signal, or blackout changes
+  useEffect(() => {
+    broadcastStateSnapshot();
+  }, [config, nowPlaying, hasAudioSignal, blackout, broadcastStateSnapshot]);
 
   const showToast = useCallback((msg: string, durationMs = 3800) => {
     setStatusToast(msg);
@@ -150,6 +229,44 @@ export default function App() {
       setStatusToast(null);
     }, durationMs);
   }, []);
+
+  const handleOpenBeamer = useCallback(async () => {
+    const win = await openProjectorWindow();
+    if (!win) {
+      showToast(
+        "Popup blocked — allow popups or copy the Projector URL from Audio & Spotify tab",
+        5000
+      );
+      return;
+    }
+    projectorWinRef.current = win;
+    showToast("Beamer Output window opened — drag to Beamer & tap Fullscreen!");
+    window.setTimeout(() => broadcastStateSnapshot(), 450);
+  }, [broadcastStateSnapshot, showToast]);
+
+  const handleCloseBeamer = useCallback(() => {
+    try {
+      if (projectorWinRef.current && !projectorWinRef.current.closed) {
+        projectorWinRef.current.close();
+      }
+    } catch {
+      // Ignore
+    }
+    projectorWinRef.current = null;
+    showToast("Beamer Output closed");
+  }, [showToast]);
+
+  const handleToggleBlackout = useCallback(() => {
+    setBlackout((prev) => {
+      const next = !prev;
+      stageChannelRef.current?.postMessage({
+        type: "blackout",
+        enabled: next,
+      } satisfies StageSyncMessage);
+      showToast(next ? "Beamer BLACKOUT active" : "Beamer Output live again");
+      return next;
+    });
+  }, [showToast]);
 
   // Apply base theme palette CSS variables
   useEffect(() => {
@@ -323,6 +440,13 @@ export default function App() {
           lastSignal = false;
           setHasAudioSignal(false);
         }
+      }
+      if (connectedProjectorsRef.current > 0 && stageChannelRef.current) {
+        stageChannelRef.current.postMessage({
+          type: "fft-frame",
+          bins: liveFftRef.current,
+          hasAudioSignal: hasLive,
+        } satisfies StageSyncMessage);
       }
       // Refresh status meter smoothly ~8x/sec while Studio is open
       if (now - lastMeterSync > 125) {
@@ -654,6 +778,58 @@ export default function App() {
             <button
               type="button"
               onClick={() =>
+                connectedProjectors > 0 ? openStudioTab("output") : void handleOpenBeamer()
+              }
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold cursor-pointer"
+              style={
+                connectedProjectors > 0
+                  ? {
+                      background: "var(--accent)",
+                      color: "var(--accent-contrast)",
+                    }
+                  : {
+                      background: "var(--bg-surface)",
+                      color: "var(--text-primary)",
+                      border: "1px solid var(--border-subtle)",
+                    }
+              }
+              title={
+                connectedProjectors > 0
+                  ? `Beamer Output live (${connectedProjectors} connected)`
+                  : "Open dedicated fullscreen Beamer / Stage Projector window"
+              }
+            >
+              <Projector
+                className={`w-3.5 h-3.5 ${
+                  connectedProjectors > 0 ? "" : "text-[var(--accent)]"
+                }`}
+              />
+              <span className="hidden md:inline">
+                {connectedProjectors > 0
+                  ? `Beamer Live${connectedProjectors > 1 ? ` (${connectedProjectors})` : ""}`
+                  : "Beamer"}
+              </span>
+            </button>
+
+            {connectedProjectors > 0 && (
+              <button
+                type="button"
+                onClick={handleToggleBlackout}
+                className={`p-1.5 rounded-lg border cursor-pointer ${
+                  blackout
+                    ? "bg-rose-500/20 border-rose-500/50 text-rose-300"
+                    : "bg-[var(--bg-surface)] border-[var(--border-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                }`}
+                title={blackout ? "Disable Beamer Blackout" : "Blackout Beamer Output"}
+                aria-label="Toggle Beamer Blackout"
+              >
+                {blackout ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() =>
                 audioStatus.capturing ? handleStopAudio() : void handleStartAudio()
               }
               className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer"
@@ -834,8 +1010,17 @@ export default function App() {
           onToggleWakeLock={() => void handleToggleWakeLock()}
           snapEnabled={snapEnabled}
           onToggleSnap={() => setSnapEnabled((v) => !v)}
+          connectedProjectors={connectedProjectors}
+          blackout={blackout}
+          onOpenBeamer={() => void handleOpenBeamer()}
+          onCloseBeamer={handleCloseBeamer}
+          onToggleBlackout={handleToggleBlackout}
         />
       )}
     </div>
   );
+}
+
+export default function App() {
+  return isProjectorWindow() ? <ProjectorSurfaceApp /> : <ControlDeckApp />;
 }
