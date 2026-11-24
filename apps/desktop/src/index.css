@@ -113,3 +113,21 @@ input[type="range"].t-slider:hover::-webkit-slider-thumb {
   animation: eq-bar 0.8s ease-in-out 0.3s infinite;
   transform-origin: bottom;
 }
+
+@keyframes t-marquee-loop {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.t-marquee-track {
+  display: inline-flex;
+  width: max-content;
+  will-change: transform;
+  animation-name: t-marquee-loop;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}

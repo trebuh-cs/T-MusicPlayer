@@ -38,6 +38,7 @@ import {
   type NowPlayingMedia,
   type ParticleShape,
   type SavedVisualizerTheme,
+  type SynthwaveDrawStyle,
   type SynthwaveMode,
   type VisualizerBackgroundMode,
   type VisualizerCenterSource,
@@ -519,56 +520,82 @@ export function CustomizeStudioModal({
                     )}
                   </section>
 
-                  {/* Synthwave Controls */}
+                  {/* Synthwave Controls (All 7 Inspiration Styles!) */}
                   {config.style === "synthwave" && (
                     <section className="space-y-3 pt-4 border-t border-[var(--border-subtle)]">
                       <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)]">
                         Synthwave Studio
                       </h3>
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
-                        {(
-                          [
-                            ["single", "Single"],
-                            ["double", "Double"],
-                            ["overlapping", "Overlapping"],
-                            ["mirrored", "Mirrored"],
-                          ] as [SynthwaveMode, string][]
-                        ).map(([mode, label]) => (
-                          <button
-                            key={mode}
-                            type="button"
-                            onClick={() => patch("synthMode", mode)}
-                            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border cursor-pointer ${
-                              config.synthMode === mode
-                                ? "bg-[var(--accent-soft)] border-[var(--accent)] text-[var(--text-primary)]"
-                                : "bg-[var(--bg-surface)] border-[var(--border-subtle)] text-[var(--text-secondary)]"
-                            }`}
-                          >
-                            {label}
-                          </button>
-                        ))}
+
+                      <div className="space-y-1.5">
+                        <div className="text-[11px] text-[var(--text-secondary)]">
+                          Waveform Draw Style
+                        </div>
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                          {(
+                            [
+                              ["half-rings", "Half-Rings"],
+                              ["ribbon", "Smooth Ribbon"],
+                              ["bars", "Vertical Bars"],
+                              ["led-blocks", "Pixel LEDs"],
+                              ["dots", "Dot Matrix"],
+                              ["mountain", "Mountain Peaks"],
+                              ["needles", "Needle Lines"],
+                            ] as [SynthwaveDrawStyle, string][]
+                          ).map(([ds, label]) => (
+                            <button
+                              key={ds}
+                              type="button"
+                              onClick={() => patch("synthDrawStyle", ds)}
+                              className={`px-2 py-1.5 rounded-lg text-[11px] font-medium border cursor-pointer ${
+                                config.synthDrawStyle === ds
+                                  ? "bg-[var(--accent-soft)] border-[var(--accent)] text-[var(--text-primary)]"
+                                  : "bg-[var(--bg-surface)] border-[var(--border-subtle)] text-[var(--text-secondary)]"
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <div className="text-[11px] text-[var(--text-secondary)]">
+                          Symmetry / Layering Mode
+                        </div>
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                          {(
+                            [
+                              ["single", "Single"],
+                              ["double", "Double"],
+                              ["overlapping", "Overlapping"],
+                              ["mirrored", "Mirrored"],
+                            ] as [SynthwaveMode, string][]
+                          ).map(([mode, label]) => (
+                            <button
+                              key={mode}
+                              type="button"
+                              onClick={() => patch("synthMode", mode)}
+                              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border cursor-pointer ${
+                                config.synthMode === mode
+                                  ? "bg-[var(--accent-soft)] border-[var(--accent)] text-[var(--text-primary)]"
+                                  : "bg-[var(--bg-surface)] border-[var(--border-subtle)] text-[var(--text-secondary)]"
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
                       </div>
 
                       <div className="grid grid-cols-2 gap-4">
-                        {(config.synthMode === "overlapping" ||
-                          config.synthMode === "mirrored") && (
-                          <SliderRow
-                            label="Wave Layers"
-                            value={config.synthLayerCount}
-                            min={1}
-                            max={6}
-                            step={1}
-                            onChange={(v) => patch("synthLayerCount", v)}
-                          />
-                        )}
                         <SliderRow
-                          label="Line Thickness"
-                          value={config.synthLineWidth}
-                          min={1}
-                          max={12}
-                          step={0.5}
-                          unit="px"
-                          onChange={(v) => patch("synthLineWidth", v)}
+                          label="Curve Smoothing (Anti-Jitter)"
+                          value={config.synthCurveSmoothing}
+                          min={0}
+                          max={10}
+                          step={1}
+                          onChange={(v) => patch("synthCurveSmoothing", v)}
                         />
                         <SliderRow
                           label="Amplitude"
@@ -579,24 +606,111 @@ export function CustomizeStudioModal({
                           unit="x"
                           onChange={(v) => patch("synthAmplitude", v)}
                         />
+                        {config.synthDrawStyle === "half-rings" && (
+                          <SliderRow
+                            label="Contour Half-Rings"
+                            value={config.synthContourCount}
+                            min={2}
+                            max={14}
+                            step={1}
+                            onChange={(v) => patch("synthContourCount", v)}
+                          />
+                        )}
+                        {(config.synthDrawStyle === "bars" ||
+                          config.synthDrawStyle === "led-blocks" ||
+                          config.synthDrawStyle === "dots" ||
+                          config.synthDrawStyle === "needles" ||
+                          config.synthDrawStyle === "mountain") && (
+                          <SliderRow
+                            label="Bar / Column Count"
+                            value={config.synthBarCount}
+                            min={16}
+                            max={140}
+                            step={2}
+                            onChange={(v) => patch("synthBarCount", v)}
+                          />
+                        )}
+                        {(config.synthDrawStyle === "bars" ||
+                          config.synthDrawStyle === "led-blocks") && (
+                          <>
+                            <SliderRow
+                              label="Bar Gap"
+                              value={config.synthBarGap}
+                              min={0}
+                              max={14}
+                              step={1}
+                              unit="px"
+                              onChange={(v) => patch("synthBarGap", v)}
+                            />
+                            <SliderRow
+                              label="Bar Rounding"
+                              value={config.synthBarRadius}
+                              min={0}
+                              max={18}
+                              step={1}
+                              unit="px"
+                              onChange={(v) => patch("synthBarRadius", v)}
+                            />
+                          </>
+                        )}
+                        {(config.synthDrawStyle === "led-blocks" ||
+                          config.synthDrawStyle === "dots" ||
+                          config.synthPixelated) && (
+                          <SliderRow
+                            label="Pixel / Dot Size"
+                            value={config.synthPixelSize}
+                            min={3}
+                            max={24}
+                            step={1}
+                            unit="px"
+                            onChange={(v) => patch("synthPixelSize", v)}
+                          />
+                        )}
+                        {(config.synthMode === "overlapping" ||
+                          config.synthMode === "mirrored") &&
+                          (config.synthDrawStyle === "ribbon" ||
+                            config.synthDrawStyle === "mountain") && (
+                            <SliderRow
+                              label="Wave Layers"
+                              value={config.synthLayerCount}
+                              min={1}
+                              max={6}
+                              step={1}
+                              onChange={(v) => patch("synthLayerCount", v)}
+                            />
+                          )}
                         <SliderRow
-                          label="Wave Frequency"
-                          value={config.synthFrequencyScale}
-                          min={0.6}
-                          max={3.5}
-                          step={0.1}
-                          unit="x"
-                          onChange={(v) => patch("synthFrequencyScale", v)}
+                          label="Line Thickness"
+                          value={config.synthLineWidth}
+                          min={1}
+                          max={12}
+                          step={0.5}
+                          unit="px"
+                          onChange={(v) => patch("synthLineWidth", v)}
                         />
-                        <SliderRow
-                          label="Wave Speed"
-                          value={config.synthWaveSpeed}
-                          min={0}
-                          max={3.0}
-                          step={0.05}
-                          unit="x"
-                          onChange={(v) => patch("synthWaveSpeed", v)}
-                        />
+                        {(config.synthDrawStyle === "ribbon" ||
+                          config.synthDrawStyle === "half-rings") && (
+                          <>
+                            <SliderRow
+                              label="Wave Frequency / Lobes"
+                              value={config.synthFrequencyScale}
+                              min={0.6}
+                              max={3.5}
+                              step={0.1}
+                              unit="x"
+                              onChange={(v) => patch("synthFrequencyScale", v)}
+                            />
+                            <SliderRow
+                              label="Wave Flow Speed"
+                              value={config.synthWaveSpeed}
+                              min={0}
+                              max={3.0}
+                              step={0.05}
+                              unit="x"
+                              onChange={(v) => patch("synthWaveSpeed", v)}
+                            />
+                          </>
+                        )}
                         <SliderRow
                           label="Vertical Offset"
                           value={config.synthVerticalOffset}
@@ -606,22 +720,11 @@ export function CustomizeStudioModal({
                           unit="%"
                           onChange={(v) => patch("synthVerticalOffset", v)}
                         />
-                        {config.synthPixelated && (
-                          <SliderRow
-                            label="Pixel Block Size"
-                            value={config.synthPixelSize}
-                            min={3}
-                            max={24}
-                            step={1}
-                            unit="px"
-                            onChange={(v) => patch("synthPixelSize", v)}
-                          />
-                        )}
                         {config.synthFilled && (
                           <SliderRow
                             label="Fill Opacity"
                             value={config.synthFillOpacity}
-                            min={0.08}
+                            min={0.05}
                             max={0.85}
                             step={0.02}
                             onChange={(v) => patch("synthFillOpacity", v)}
@@ -630,17 +733,23 @@ export function CustomizeStudioModal({
                       </div>
 
                       <div className="grid grid-cols-2 gap-2">
-                        <ToggleRow
-                          label="Pixelated Retro Mode"
-                          description="Stepped pixel-art wave"
-                          checked={config.synthPixelated}
-                          onToggle={() => patch("synthPixelated", !config.synthPixelated)}
-                        />
-                        <ToggleRow
-                          label="Filled Ribbon"
-                          checked={config.synthFilled}
-                          onToggle={() => patch("synthFilled", !config.synthFilled)}
-                        />
+                        {config.synthDrawStyle === "ribbon" && (
+                          <ToggleRow
+                            label="Pixelated Ribbon"
+                            description="Stepped retro block curve"
+                            checked={config.synthPixelated}
+                            onToggle={() => patch("synthPixelated", !config.synthPixelated)}
+                          />
+                        )}
+                        {(config.synthDrawStyle === "ribbon" ||
+                          config.synthDrawStyle === "half-rings" ||
+                          config.synthDrawStyle === "mountain") && (
+                          <ToggleRow
+                            label="Area Fill"
+                            checked={config.synthFilled}
+                            onToggle={() => patch("synthFilled", !config.synthFilled)}
+                          />
+                        )}
                         <ToggleRow
                           label="Horizon Floor Grid"
                           description="Retro 3D perspective floor"
@@ -658,18 +767,19 @@ export function CustomizeStudioModal({
                     </section>
                   )}
 
-                  {/* 2.5D Heightmap Controls */}
+                  {/* 2.5D Heightmap Controls (Optimized + 3D Pillars!) */}
                   {config.style === "heightmap" && (
                     <section className="space-y-3 pt-4 border-t border-[var(--border-subtle)]">
                       <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)]">
-                        2.5D Audio Heightmap
+                        2.5D Audio Heightmap &amp; 3D Pillars
                       </h3>
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
                         {(
                           [
+                            ["bars-3d", "3D Pillars"],
                             ["ridges", "Ridges"],
                             ["wireframe", "Wireframe"],
-                            ["filled-mesh", "Filled Terrain"],
+                            ["filled-mesh", "Terrain"],
                             ["dots", "3D Matrix"],
                           ] as [HeightmapRenderMode, string][]
                         ).map(([mode, label]) => (
@@ -677,7 +787,7 @@ export function CustomizeStudioModal({
                             key={mode}
                             type="button"
                             onClick={() => patch("hmRenderMode", mode)}
-                            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border cursor-pointer ${
+                            className={`px-2 py-1.5 rounded-lg text-[11px] font-medium border cursor-pointer ${
                               config.hmRenderMode === mode
                                 ? "bg-[var(--accent-soft)] border-[var(--accent)] text-[var(--text-primary)]"
                                 : "bg-[var(--bg-surface)] border-[var(--border-subtle)] text-[var(--text-secondary)]"
@@ -692,16 +802,16 @@ export function CustomizeStudioModal({
                         <SliderRow
                           label="Depth Rows"
                           value={config.hmRows}
-                          min={12}
-                          max={52}
+                          min={8}
+                          max={48}
                           step={2}
                           onChange={(v) => patch("hmRows", v)}
                         />
                         <SliderRow
                           label="Frequency Columns"
                           value={config.hmCols}
-                          min={20}
-                          max={96}
+                          min={12}
+                          max={80}
                           step={2}
                           onChange={(v) => patch("hmCols", v)}
                         />
@@ -740,6 +850,33 @@ export function CustomizeStudioModal({
                           unit="x"
                           onChange={(v) => patch("hmScrollSpeed", v)}
                         />
+                        {config.hmRenderMode === "bars-3d" && (
+                          <SliderRow
+                            label="3D Pillar Width"
+                            value={config.hmBarWidthRatio}
+                            min={0.25}
+                            max={0.95}
+                            step={0.05}
+                            onChange={(v) => patch("hmBarWidthRatio", v)}
+                          />
+                        )}
+                        <SliderRow
+                          label="Curve Smoothing"
+                          value={config.hmCurveSmoothing}
+                          min={0}
+                          max={6}
+                          step={1}
+                          onChange={(v) => patch("hmCurveSmoothing", v)}
+                        />
+                        <SliderRow
+                          label="Vertical Offset"
+                          value={config.hmVerticalOffset}
+                          min={-25}
+                          max={25}
+                          step={1}
+                          unit="%"
+                          onChange={(v) => patch("hmVerticalOffset", v)}
+                        />
                         <SliderRow
                           label="Line / Dot Size"
                           value={config.hmLineWidth}
@@ -751,12 +888,24 @@ export function CustomizeStudioModal({
                         />
                       </div>
 
-                      <ToggleRow
-                        label="Symmetric Peaks"
-                        description="Mirror low frequencies toward center"
-                        checked={config.hmMirrored}
-                        onToggle={() => patch("hmMirrored", !config.hmMirrored)}
-                      />
+                      <div className="grid grid-cols-2 gap-2">
+                        <ToggleRow
+                          label="Symmetric Peaks"
+                          checked={config.hmMirrored}
+                          onToggle={() => patch("hmMirrored", !config.hmMirrored)}
+                        />
+                        {(config.hmRenderMode === "bars-3d" ||
+                          config.hmRenderMode === "dots") && (
+                          <ToggleRow
+                            label="Wireframe Floor Grid"
+                            description="Perspective base plane"
+                            checked={config.hmShowBaseGrid}
+                            onToggle={() =>
+                              patch("hmShowBaseGrid", !config.hmShowBaseGrid)
+                            }
+                          />
+                        )}
+                      </div>
                     </section>
                   )}
 
@@ -1669,29 +1818,95 @@ export function CustomizeStudioModal({
                     </div>
 
                     {config.titlePosition !== "hidden" && (
-                      <div className="space-y-2.5">
-                        <SliderRow
-                          label="Text Size"
-                          value={config.titleScale}
-                          min={0.7}
-                          max={2.0}
-                          step={0.05}
-                          unit="x"
-                          onChange={(v) => patch("titleScale", v)}
-                        />
+                      <div className="space-y-3">
                         <div className="grid grid-cols-2 gap-2">
                           <ToggleRow
-                            label="Show Artist / Subtitle"
+                            label="Show Artist"
                             checked={config.showSubtitle}
                             onToggle={() => patch("showSubtitle", !config.showSubtitle)}
                           />
-                          {config.titleSource === "auto-media" && (
-                            <ToggleRow
-                              label="Show App Tag (Spotify)"
-                              checked={config.showMediaSourceBadge}
-                              onToggle={() =>
-                                patch("showMediaSourceBadge", !config.showMediaSourceBadge)
-                              }
+                          <ToggleRow
+                            label="Show Source (Spotify)"
+                            checked={config.showMediaSourceBadge}
+                            onToggle={() =>
+                              patch("showMediaSourceBadge", !config.showMediaSourceBadge)
+                            }
+                          />
+                          <ToggleRow
+                            label="Slim Single-Line Pill"
+                            description="Thin compact 1-row bar"
+                            checked={config.titleCompact}
+                            onToggle={() => patch("titleCompact", !config.titleCompact)}
+                          />
+                          <ToggleRow
+                            label="Show Box Border"
+                            checked={config.titleShowBorder}
+                            onToggle={() =>
+                              patch("titleShowBorder", !config.titleShowBorder)
+                            }
+                          />
+                          <ToggleRow
+                            label="Scroll Loop (Marquee)"
+                            description="Loop text when wider than Max Width"
+                            checked={config.titleMarquee}
+                            onToggle={() => patch("titleMarquee", !config.titleMarquee)}
+                          />
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-4">
+                          <SliderRow
+                            label="Text Size"
+                            value={config.titleScale}
+                            min={0.6}
+                            max={2.0}
+                            step={0.05}
+                            unit="x"
+                            onChange={(v) => patch("titleScale", v)}
+                          />
+                          <SliderRow
+                            label="Max Box Width"
+                            value={config.titleMaxWidth}
+                            min={140}
+                            max={960}
+                            step={10}
+                            unit="px"
+                            onChange={(v) => patch("titleMaxWidth", v)}
+                          />
+                          <SliderRow
+                            label="Box Thickness (Pad Y)"
+                            value={config.titlePaddingY}
+                            min={2}
+                            max={18}
+                            step={1}
+                            unit="px"
+                            onChange={(v) => patch("titlePaddingY", v)}
+                          />
+                          <SliderRow
+                            label="Side Padding (Pad X)"
+                            value={config.titlePaddingX}
+                            min={6}
+                            max={36}
+                            step={2}
+                            unit="px"
+                            onChange={(v) => patch("titlePaddingX", v)}
+                          />
+                          <SliderRow
+                            label="Box Background Opacity"
+                            value={config.titleBoxOpacity}
+                            min={0}
+                            max={1.0}
+                            step={0.05}
+                            onChange={(v) => patch("titleBoxOpacity", v)}
+                          />
+                          {config.titleMarquee && (
+                            <SliderRow
+                              label="Scroll Loop Speed"
+                              value={config.titleMarqueeSpeed}
+                              min={20}
+                              max={140}
+                              step={5}
+                              unit="px/s"
+                              onChange={(v) => patch("titleMarqueeSpeed", v)}
                             />
                           )}
                         </div>

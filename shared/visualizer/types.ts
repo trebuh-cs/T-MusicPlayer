@@ -35,7 +35,21 @@ export type CircleRingColorMode = "match-bars" | "theme-accent" | "custom";
 
 export type SynthwaveMode = "single" | "double" | "overlapping" | "mirrored";
 
-export type HeightmapRenderMode = "ridges" | "wireframe" | "filled-mesh" | "dots";
+export type SynthwaveDrawStyle =
+  | "ribbon"
+  | "half-rings"
+  | "bars"
+  | "led-blocks"
+  | "dots"
+  | "mountain"
+  | "needles";
+
+export type HeightmapRenderMode =
+  | "bars-3d"
+  | "ridges"
+  | "wireframe"
+  | "filled-mesh"
+  | "dots";
 
 export type ParticleShape = "circle" | "square" | "diamond";
 
@@ -93,9 +107,15 @@ export interface VisualizerConfig {
   edgePadding: number;
   edgeOpacity: number;
 
-  // Ultra-Customizable Synthwave
+  // Ultra-Customizable Synthwave (All Reference Inspiration Styles!)
+  synthDrawStyle: SynthwaveDrawStyle;
   synthMode: SynthwaveMode;
   synthLayerCount: number;
+  synthContourCount: number;
+  synthCurveSmoothing: number;
+  synthBarCount: number;
+  synthBarGap: number;
+  synthBarRadius: number;
   synthPixelated: boolean;
   synthPixelSize: number;
   synthFilled: boolean;
@@ -108,7 +128,7 @@ export interface VisualizerConfig {
   synthShowBaseline: boolean;
   synthHorizonGrid: boolean;
 
-  // 2.5D Audio Heightmap / Terrain
+  // 2.5D Audio Heightmap / 3D Pillars / Terrain
   hmRenderMode: HeightmapRenderMode;
   hmRows: number;
   hmCols: number;
@@ -118,6 +138,10 @@ export interface VisualizerConfig {
   hmScrollSpeed: number;
   hmLineWidth: number;
   hmMirrored: boolean;
+  hmShowBaseGrid: boolean;
+  hmBarWidthRatio: number;
+  hmCurveSmoothing: number;
+  hmVerticalOffset: number;
 
   // Concentric Shockwave / Radar Polygons
   radarRingCount: number;
@@ -134,13 +158,21 @@ export interface VisualizerConfig {
   partBassKick: number;
   partShape: ParticleShape;
 
-  // Title & Now-Playing Overlay
+  // Title & Now-Playing Textbox Overlay
   titlePosition: VisualizerTitlePosition;
   titleSource: VisualizerTitleSource;
   showSubtitle: boolean;
   showArtistInTitle: boolean;
   showMediaSourceBadge: boolean;
   titleScale: number;
+  titleCompact: boolean;
+  titlePaddingY: number;
+  titlePaddingX: number;
+  titleBoxOpacity: number;
+  titleShowBorder: boolean;
+  titleMaxWidth: number;
+  titleMarquee: boolean;
+  titleMarqueeSpeed: number;
   customTitle: string;
   customSubtitle: string;
 
@@ -199,34 +231,44 @@ export const DEFAULT_VISUALIZER_CONFIG: VisualizerConfig = {
   edgePadding: 0,
   edgeOpacity: 0.95,
 
-  synthMode: "overlapping",
+  synthDrawStyle: "half-rings",
+  synthMode: "mirrored",
   synthLayerCount: 3,
+  synthContourCount: 7,
+  synthCurveSmoothing: 5,
+  synthBarCount: 64,
+  synthBarGap: 4,
+  synthBarRadius: 4,
   synthPixelated: false,
   synthPixelSize: 8,
   synthFilled: true,
-  synthFillOpacity: 0.24,
-  synthLineWidth: 3,
+  synthFillOpacity: 0.28,
+  synthLineWidth: 2.5,
   synthAmplitude: 1.15,
   synthFrequencyScale: 1.4,
-  synthWaveSpeed: 1.0,
+  synthWaveSpeed: 0.85,
   synthVerticalOffset: 0,
   synthShowBaseline: true,
-  synthHorizonGrid: true,
+  synthHorizonGrid: false,
 
-  hmRenderMode: "ridges",
-  hmRows: 28,
-  hmCols: 52,
+  hmRenderMode: "bars-3d",
+  hmRows: 22,
+  hmCols: 36,
   hmElevation: 1.25,
   hmTilt: 48,
   hmPerspective: 0.65,
   hmScrollSpeed: 1.1,
-  hmLineWidth: 1.8,
+  hmLineWidth: 1.6,
   hmMirrored: true,
+  hmShowBaseGrid: true,
+  hmBarWidthRatio: 0.68,
+  hmCurveSmoothing: 2,
+  hmVerticalOffset: 0,
 
-  radarRingCount: 5,
-  radarPolygonSides: 6,
+  radarRingCount: 6,
+  radarPolygonSides: 0,
   radarLineWidth: 2.5,
-  radarFillOpacity: 0.12,
+  radarFillOpacity: 0.08,
   radarSpread: 1.05,
 
   partCount: 84,
@@ -242,6 +284,14 @@ export const DEFAULT_VISUALIZER_CONFIG: VisualizerConfig = {
   showArtistInTitle: true,
   showMediaSourceBadge: true,
   titleScale: 1.0,
+  titleCompact: false,
+  titlePaddingY: 8,
+  titlePaddingX: 16,
+  titleBoxOpacity: 0.82,
+  titleShowBorder: true,
+  titleMaxWidth: 420,
+  titleMarquee: true,
+  titleMarqueeSpeed: 55,
   customTitle: "T - VISUALIZER",
   customSubtitle: "Live Audio",
 
@@ -285,20 +335,17 @@ export function mergeVisualizerConfig(
     ...defaults,
     ...raw,
   };
-  // Legacy field sync: showSubtitle <-> showArtistInTitle
   if (typeof raw.showSubtitle === "boolean") {
     merged.showArtistInTitle = raw.showSubtitle;
   } else if (typeof raw.showArtistInTitle === "boolean") {
     merged.showSubtitle = raw.showArtistInTitle;
   }
-  // Migrate legacy "all" stretched monitor to "mirrored"
   if (merged.selectedMonitorId === "all") {
     merged.selectedMonitorId = "mirrored";
   }
   return merged;
 }
 
-/** Strips machine-specific hardware/monitor IDs when exporting or applying a portable theme. */
 export function stripHostFields(config: VisualizerConfig): Partial<VisualizerConfig> {
   const {
     selectedDeviceId: _dev,

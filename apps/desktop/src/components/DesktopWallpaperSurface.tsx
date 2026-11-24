@@ -8,6 +8,7 @@ import {
   type DesktopWallpaperPayload,
 } from "../types";
 import { CircularVisualizerCanvas } from "./CircularVisualizerCanvas";
+import { NowPlayingOverlay } from "./NowPlayingOverlay";
 
 const DEFAULT_PAYLOAD: DesktopWallpaperPayload = {
   config: DEFAULT_CINEMATIC_CONFIG,
@@ -19,10 +20,6 @@ const DEFAULT_PAYLOAD: DesktopWallpaperPayload = {
   coverUrl: null,
 };
 
-/**
- * Ultra-lightweight wallpaper surface mounted exclusively in dedicated `wallpaper-*` windows
- * spawned by T - MusicPlayer. Receives 60fps FFT & live track/config updates from `main`.
- */
 export function DesktopWallpaperSurface() {
   const [payload, setPayload] = useState<DesktopWallpaperPayload>(DEFAULT_PAYLOAD);
   const liveFftRef = useRef<Uint8Array>(new Uint8Array(256));
@@ -92,59 +89,22 @@ export function DesktopWallpaperSurface() {
     };
   }, []);
 
-  const cfg = payload.config;
-  const displayTitle =
-    cfg.titleSource === "custom" ? cfg.customTitle.trim() : payload.title.trim();
-  const displayArtist =
-    cfg.titleSource === "custom" ? cfg.customSubtitle.trim() : payload.artist.trim();
-  const showSub = cfg.showSubtitle || cfg.showArtistInTitle;
-
-  const titlePosClass =
-    cfg.titlePosition === "above"
-      ? "top-12 inset-x-10 text-center"
-      : cfg.titlePosition === "below"
-      ? "bottom-14 inset-x-10 text-center"
-      : cfg.titlePosition === "bottom-left"
-      ? "bottom-10 left-10 max-w-[60vw] text-left"
-      : "bottom-8 inset-x-10 text-center";
-
   return (
     <div className="fixed inset-0 w-screen h-screen overflow-hidden bg-[var(--bg-base)] select-none">
       <CircularVisualizerCanvas
-        config={cfg}
+        config={payload.config}
         liveFftRef={liveFftRef}
         isPlaying={payload.isPlaying}
         isRadio={payload.isRadio}
         themeId={payload.themeId}
         coverUrl={payload.coverUrl}
       />
-
-      {cfg.titlePosition !== "hidden" && (displayTitle || displayArtist) && (
-        <div className={`absolute z-10 pointer-events-none select-none ${titlePosClass}`}>
-          <div
-            className={`inline-flex flex-col ${
-              cfg.titlePosition === "bottom-left" ? "items-start" : "items-center"
-            } px-4 py-2 rounded-xl bg-[var(--bg-elevated)]/85 border border-[var(--border-subtle)]`}
-          >
-            {displayTitle && (
-              <div
-                className="font-bold tracking-tight text-[var(--text-primary)] leading-tight truncate max-w-full"
-                style={{ fontSize: `${Math.round(24 * cfg.titleScale)}px` }}
-              >
-                {displayTitle}
-              </div>
-            )}
-            {showSub && displayArtist && (
-              <div
-                className="text-[var(--text-secondary)] mt-0.5 truncate max-w-full"
-                style={{ fontSize: `${Math.round(14 * cfg.titleScale)}px` }}
-              >
-                {displayArtist}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+      <NowPlayingOverlay
+        config={payload.config}
+        title={payload.title}
+        artist={payload.artist}
+        sourceLabel={payload.isRadio ? "Internet Radio" : "T - MusicPlayer"}
+      />
     </div>
   );
 }

@@ -3,6 +3,7 @@ import { Sliders, Wallpaper, X } from "lucide-react";
 import { getCoverUrl } from "../services/api";
 import type { CinematicConfig, PlayingItem } from "../types";
 import { CircularVisualizerCanvas } from "./CircularVisualizerCanvas";
+import { NowPlayingOverlay } from "./NowPlayingOverlay";
 
 interface CinematicOverlayProps {
   config: CinematicConfig;
@@ -67,21 +68,6 @@ export function CinematicOverlay({
       ? "Live Internet Radio"
       : "";
 
-  const displayTitle =
-    config.titleSource === "custom" ? config.customTitle.trim() : autoTitle;
-  const displayArtist =
-    config.titleSource === "custom" ? config.customSubtitle.trim() : autoArtist;
-  const showSub = config.showSubtitle || config.showArtistInTitle;
-
-  const titlePosClass =
-    config.titlePosition === "above"
-      ? "top-12 inset-x-10 text-center"
-      : config.titlePosition === "below"
-      ? "bottom-14 inset-x-10 text-center"
-      : config.titlePosition === "bottom-left"
-      ? "bottom-10 left-10 max-w-[60vw] text-left"
-      : "bottom-8 inset-x-10 text-center";
-
   return (
     <div
       className="fixed inset-0 z-50 bg-[var(--bg-base)] overflow-hidden"
@@ -89,7 +75,6 @@ export function CinematicOverlay({
         cursor: controlsVisible ? "default" : "none",
       }}
     >
-      {/* Subtle auto-hiding exit, wallpaper & settings controls */}
       <div
         className={`fixed top-5 right-5 z-20 flex items-center gap-2 transition-opacity duration-200 ${
           controlsVisible ? "opacity-100" : "opacity-0 pointer-events-none"
@@ -143,32 +128,12 @@ export function CinematicOverlay({
           coverUrl={coverUrl}
         />
 
-        {config.titlePosition !== "hidden" && (displayTitle || displayArtist) && (
-          <div className={`absolute z-10 pointer-events-none select-none ${titlePosClass}`}>
-            <div
-              className={`inline-flex flex-col ${
-                config.titlePosition === "bottom-left" ? "items-start" : "items-center"
-              } px-4 py-2 rounded-xl bg-[var(--bg-elevated)]/85 border border-[var(--border-subtle)]`}
-            >
-              {displayTitle && (
-                <div
-                  className="font-bold tracking-tight text-[var(--text-primary)] leading-tight truncate max-w-full"
-                  style={{ fontSize: `${Math.round(24 * config.titleScale)}px` }}
-                >
-                  {displayTitle}
-                </div>
-              )}
-              {showSub && displayArtist && (
-                <div
-                  className="text-[var(--text-secondary)] mt-0.5 truncate max-w-full"
-                  style={{ fontSize: `${Math.round(14 * config.titleScale)}px` }}
-                >
-                  {displayArtist}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
+        <NowPlayingOverlay
+          config={config}
+          title={autoTitle}
+          artist={autoArtist}
+          sourceLabel={nowPlaying?.kind === "radio" ? "Internet Radio" : "T - MusicPlayer"}
+        />
       </div>
     </div>
   );
