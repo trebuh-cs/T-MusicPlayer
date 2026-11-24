@@ -1,0 +1,127 @@
+@import "tailwindcss";
+
+:root {
+  --bg-base: #090a09;
+  --bg-elevated: #111311;
+  --bg-surface: #181b18;
+  --bg-hover: #212621;
+  --border-subtle: rgba(10, 249, 42, 0.14);
+  --text-primary: #f2f5f2;
+  --text-secondary: #a0b0a2;
+  --text-muted: #5e6e60;
+  --accent: #0af92a;
+  --accent-contrast: #061108;
+  --accent-soft: rgba(10, 249, 42, 0.14);
+  --viz-start: #0af92a;
+  --viz-end: #49ecc1;
+  --font-display: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.font-mono-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.safe-pt {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+.safe-pb {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+input[type="range"].t-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  touch-action: pan-y;
+}
+
+input[type="range"].t-slider::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 9999px;
+}
+
+input[type="range"].t-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -5px;
+  border-radius: 9999px;
+  background: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  transition: transform 0.12s ease;
+}
+
+@media (pointer: coarse) {
+  input[type="range"].t-slider::-webkit-slider-thumb {
+    width: 22px;
+    height: 22px;
+    margin-top: -8px;
+  }
+}
+
+input[type="range"].t-slider:hover::-webkit-slider-thumb {
+  transform: scale(1.15);
+}
+
+@keyframes t-marquee-loop {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.t-marquee-track {
+  display: inline-flex;
+  width: max-content;
+  will-change: transform;
+  animation-name: t-marquee-loop;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}

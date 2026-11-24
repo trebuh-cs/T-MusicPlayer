@@ -1,0 +1,30 @@
+{
+  "name": "T - Visualizer Live",
+  "short_name": "T - Visualizer",
+  "description": "Fullscreen live audio visualizer for iPad & stage setups with Spotify Now Playing sync and portable .tviz themes.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#090a09",
+  "theme_color": "#090a09",
+  "icons": [
+    {
+      "src": "./icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

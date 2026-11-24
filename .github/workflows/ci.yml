@@ -41,6 +41,19 @@ jobs:
       - run: npm run build
         working-directory: apps/desktop
 
+  visualizer-web:
+    name: iPad & Web Visualizer PWA Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+        working-directory: apps/visualizer-web
+      - run: npm run build
+        working-directory: apps/visualizer-web
+
   android:
     name: Android Pixel Companion App (Kotlin + Compose)
     runs-on: ubuntu-latest
