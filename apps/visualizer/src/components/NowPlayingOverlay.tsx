@@ -298,7 +298,8 @@ export function NowPlayingOverlay({
           left: `${posX}%`,
           top: `${posY}%`,
           transform: `translate(${-posX}%, ${-posY}%)`,
-          maxWidth: `${maxW}px`,
+          maxWidth: config.titleUnlimitedWidth ? "none" : `${maxW}px`,
+          width: config.titleUnlimitedWidth ? "max-content" : undefined,
           padding: `${padY}px ${padX}px`,
           fontFamily,
           backgroundColor:
@@ -327,7 +328,7 @@ export function NowPlayingOverlay({
             <div className="min-w-0 flex-1">
               <MarqueeLine
                 text={compactCombined}
-                enabled={config.titleMarquee}
+                enabled={!config.titleUnlimitedWidth && config.titleMarquee}
                 speedPxPerSec={config.titleMarqueeSpeed}
                 className="leading-snug"
                 style={{
@@ -353,7 +354,7 @@ export function NowPlayingOverlay({
             {title && (
               <MarqueeLine
                 text={title}
-                enabled={config.titleMarquee}
+                enabled={!config.titleUnlimitedWidth && config.titleMarquee}
                 speedPxPerSec={config.titleMarqueeSpeed}
                 className="leading-tight"
                 style={{
@@ -368,7 +369,7 @@ export function NowPlayingOverlay({
             {showSub && (
               <MarqueeLine
                 text={subtitle}
-                enabled={config.titleMarquee}
+                enabled={!config.titleUnlimitedWidth && config.titleMarquee}
                 speedPxPerSec={config.titleMarqueeSpeed}
                 className="mt-0.5 leading-snug"
                 style={{

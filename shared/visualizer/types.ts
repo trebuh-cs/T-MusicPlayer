@@ -220,6 +220,7 @@ export interface VisualizerConfig {
   titleBoxOpacity: number;
   titleShowBorder: boolean;
   titleMaxWidth: number;
+  titleUnlimitedWidth: boolean;
   titleMarquee: boolean;
   titleMarqueeSpeed: number;
   customTitle: string;
@@ -349,6 +350,7 @@ export const DEFAULT_VISUALIZER_CONFIG: VisualizerConfig = {
   titleBoxOpacity: 0.82,
   titleShowBorder: true,
   titleMaxWidth: 420,
+  titleUnlimitedWidth: false,
   titleMarquee: true,
   titleMarqueeSpeed: 55,
   customTitle: "T - VISUALIZER",

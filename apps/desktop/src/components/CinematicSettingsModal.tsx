@@ -1995,11 +1995,21 @@ export function CinematicSettingsModal({
                             onToggle={() => patch("titleCompact", !config.titleCompact)}
                           />
                           <ToggleRow
-                            label="Scroll Loop (Marquee)"
-                            description="Loop text when wider than Max Width"
-                            checked={config.titleMarquee}
-                            onToggle={() => patch("titleMarquee", !config.titleMarquee)}
+                            label="Unlimited Box Width"
+                            description="Never restrict or clip text box length"
+                            checked={config.titleUnlimitedWidth}
+                            onToggle={() =>
+                              patch("titleUnlimitedWidth", !config.titleUnlimitedWidth)
+                            }
                           />
+                          {!config.titleUnlimitedWidth && (
+                            <ToggleRow
+                              label="Scroll Loop (Marquee)"
+                              description="Loop text when wider than Max Width"
+                              checked={config.titleMarquee}
+                              onToggle={() => patch("titleMarquee", !config.titleMarquee)}
+                            />
+                          )}
                           {config.titleShowBox && (
                             <ToggleRow
                               label="Show Box Border"
@@ -2052,16 +2062,18 @@ export function CinematicSettingsModal({
                             unit="px"
                             onChange={(v) => patch("titleLetterSpacing", v)}
                           />
-                          <SliderRow
-                            label="Max Box Width"
-                            value={config.titleMaxWidth}
-                            min={140}
-                            max={960}
-                            step={10}
-                            unit="px"
-                            onChange={(v) => patch("titleMaxWidth", v)}
-                          />
-                          {config.titleMarquee && (
+                          {!config.titleUnlimitedWidth && (
+                            <SliderRow
+                              label="Max Box Width"
+                              value={config.titleMaxWidth}
+                              min={140}
+                              max={3600}
+                              step={20}
+                              unit="px"
+                              onChange={(v) => patch("titleMaxWidth", v)}
+                            />
+                          )}
+                          {!config.titleUnlimitedWidth && config.titleMarquee && (
                             <SliderRow
                               label="Scroll Loop Speed"
                               value={config.titleMarqueeSpeed}
