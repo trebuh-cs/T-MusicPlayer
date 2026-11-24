@@ -193,6 +193,7 @@ function MainApp() {
   );
   const [studioOpen, setStudioOpen] = useState(false);
   const [wallpaperMode, setWallpaperMode] = useState(false);
+  const [autostartWallpaper, setAutostartWallpaper] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [hudVisible, setHudVisible] = useState(true);
   const [audioStatus, setAudioStatus] = useState<AudioStatus | null>(null);
@@ -252,13 +253,14 @@ function MainApp() {
 
   const refreshHardware = useCallback(async () => {
     try {
-      const [devs, mons, wpActive, fsActive, status, media] = await Promise.all([
+      const [devs, mons, wpActive, fsActive, status, media, autoWp] = await Promise.all([
         api.listAudioDevices(),
         api.listMonitors(),
         api.isWallpaperMode(),
         api.isWindowFullscreen(),
         api.getAudioStatus(),
         api.getNowPlaying(),
+        api.getAutostartWallpaper(),
       ]);
       setDevices(devs);
       setMonitors(mons);
@@ -266,16 +268,63 @@ function MainApp() {
       setIsFullscreen(fsActive);
       setAudioStatus(status);
       setNowPlaying(media);
+      setAutostartWallpaper(autoWp);
     } catch {
       // Ignore during initial mount
     }
   }, []);
+
+  const handleToggleAutostartWallpaper = useCallback(async () => {
+    try {
+      const next = await api.setAutostartWallpaper(!autostartWallpaper);
+      setAutostartWallpaper(next);
+      showToast(
+        next
+          ? "Autostart Live Wallpaper enabled (starts directly into Wallpaper Mode on PC boot)"
+          : "Autostart Live Wallpaper disabled"
+      );
+    } catch (err) {
+      showToast(`Autostart error: ${String(err)}`);
+    }
+  }, [autostartWallpaper, showToast]);
 
   useEffect(() => {
     void refreshHardware();
     if (configRef.current.selectedDeviceId) {
       void api.selectAudioDevice(configRef.current.selectedDeviceId);
     }
+    // If launched by Windows Startup (`--wallpaper`), wait briefly for Explorer's WorkerW
+    // to settle after login, sync saved config, and enter Live Wallpaper Mode automatically.
+    let cancelled = false;
+    void api
+      .launchedInWallpaperAutostart()
+      .then((shouldAuto) => {
+        if (!shouldAuto || cancelled) return;
+        const launchWallpaper = async (attempt: number) => {
+          if (cancelled) return;
+          try {
+            await api.syncVisualizerConfig(JSON.stringify(configRef.current));
+            const active = await api.setWallpaperMode(
+              true,
+              configRef.current.selectedMonitorId,
+              false
+            );
+            if (!cancelled) {
+              setWallpaperMode(active);
+              setStudioOpen(false);
+            }
+          } catch {
+            if (attempt < 2 && !cancelled) {
+              window.setTimeout(() => void launchWallpaper(attempt + 1), 2200);
+            }
+          }
+        };
+        window.setTimeout(() => void launchWallpaper(0), 700);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [refreshHardware]);
 
   useEffect(() => {
@@ -518,7 +567,18 @@ function MainApp() {
           hasAudioSignal={hasAudioSignal}
           albumArtUrl={nowPlaying?.thumbnail_data_url ?? null}
         />
-        <NowPlayingOverlay config={config} nowPlaying={nowPlaying} />
+        <NowPlayingOverlay
+          config={config}
+          nowPlaying={nowPlaying}
+          onMovePosition={(x, y) =>
+            setConfig((prev) => ({
+              ...prev,
+              titlePosition: "custom",
+              titlePosX: x,
+              titlePosY: y,
+            }))
+          }
+        />
       </div>
 
       {/* Auto-hiding Matte Top HUD Bar */}
@@ -658,6 +718,8 @@ function MainApp() {
           onClose={() => setStudioOpen(false)}
           onToggleWallpaper={() => void handleToggleWallpaper()}
           wallpaperMode={wallpaperMode}
+          autostartWallpaper={autostartWallpaper}
+          onToggleAutostartWallpaper={() => void handleToggleAutostartWallpaper()}
           liveFftRef={liveFftRef}
           hasAudioSignal={hasAudioSignal}
           audioStatus={audioStatus}

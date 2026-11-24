@@ -18,9 +18,48 @@ export type VisualizerTitlePosition =
   | "above"
   | "below"
   | "bottom-center"
-  | "bottom-left";
+  | "bottom-left"
+  | "custom";
 
 export type VisualizerTitleSource = "auto-media" | "custom";
+
+export type TitleFontFamilyId =
+  | "modern"
+  | "mono"
+  | "display"
+  | "geometric"
+  | "serif"
+  | "condensed"
+  | "retro"
+  | "script";
+
+export type TitleFontWeight = "normal" | "semibold" | "bold" | "black";
+
+export type TitleTextAlign = "left" | "center" | "right";
+
+export type TitleTextColorMode = "theme" | "custom";
+
+export const TITLE_FONT_OPTIONS: {
+  id: TitleFontFamilyId;
+  label: string;
+  cssFamily: string;
+}[] = [
+  { id: "modern", label: "Modern Sans", cssFamily: "'Inter', 'Segoe UI', system-ui, sans-serif" },
+  { id: "mono", label: "Tech Mono", cssFamily: "'JetBrains Mono', 'Cascadia Mono', Consolas, monospace" },
+  { id: "display", label: "Impact Display", cssFamily: "'Bahnschrift', 'Impact', 'Arial Black', sans-serif" },
+  { id: "geometric", label: "Geometric Clean", cssFamily: "'Century Gothic', 'Trebuchet MS', 'Segoe UI', sans-serif" },
+  { id: "serif", label: "Editorial Serif", cssFamily: "'Georgia', 'Cambria', 'Times New Roman', serif" },
+  { id: "condensed", label: "Studio Condensed", cssFamily: "'Bahnschrift Condensed', 'Arial Narrow', 'Segoe UI', sans-serif" },
+  { id: "retro", label: "Retro Terminal", cssFamily: "'Lucida Console', 'Courier New', monospace" },
+  { id: "script", label: "Handwritten", cssFamily: "'Segoe Print', 'Comic Sans MS', cursive" },
+];
+
+export function resolveTitleFontCss(id: TitleFontFamilyId | undefined): string {
+  return (
+    TITLE_FONT_OPTIONS.find((f) => f.id === id)?.cssFamily ??
+    TITLE_FONT_OPTIONS[0].cssFamily
+  );
+}
 
 export type VisualizerCenterSource =
   | "auto"
@@ -165,6 +204,16 @@ export interface VisualizerConfig {
   showArtistInTitle: boolean;
   showMediaSourceBadge: boolean;
   titleScale: number;
+  titleFontFamily: TitleFontFamilyId;
+  titleFontWeight: TitleFontWeight;
+  titleLetterSpacing: number;
+  titleUppercase: boolean;
+  titleAlign: TitleTextAlign;
+  titleTextColorMode: TitleTextColorMode;
+  titleCustomColor: string;
+  titleShowBox: boolean;
+  titlePosX: number; // 0..100 (% of container width)
+  titlePosY: number; // 0..100 (% of container height)
   titleCompact: boolean;
   titlePaddingY: number;
   titlePaddingX: number;
@@ -284,6 +333,16 @@ export const DEFAULT_VISUALIZER_CONFIG: VisualizerConfig = {
   showArtistInTitle: true,
   showMediaSourceBadge: true,
   titleScale: 1.0,
+  titleFontFamily: "modern",
+  titleFontWeight: "bold",
+  titleLetterSpacing: 0,
+  titleUppercase: false,
+  titleAlign: "center",
+  titleTextColorMode: "theme",
+  titleCustomColor: "#FFFFFF",
+  titleShowBox: true,
+  titlePosX: 50,
+  titlePosY: 90,
   titleCompact: false,
   titlePaddingY: 8,
   titlePaddingX: 16,
@@ -342,6 +401,26 @@ export function mergeVisualizerConfig(
   }
   if (merged.selectedMonitorId === "all") {
     merged.selectedMonitorId = "mirrored";
+  }
+  // Migrate legacy fixed anchor presets into percentage coordinates if X/Y were not saved yet
+  if (typeof raw.titlePosX !== "number" || typeof raw.titlePosY !== "number") {
+    if (merged.titlePosition === "above") {
+      merged.titlePosX = 50;
+      merged.titlePosY = 12;
+      merged.titleAlign = "center";
+    } else if (merged.titlePosition === "bottom-left") {
+      merged.titlePosX = 6;
+      merged.titlePosY = 92;
+      merged.titleAlign = "left";
+    } else if (merged.titlePosition === "below") {
+      merged.titlePosX = 50;
+      merged.titlePosY = 86;
+      merged.titleAlign = "center";
+    } else if (merged.titlePosition === "bottom-center") {
+      merged.titlePosX = 50;
+      merged.titlePosY = 92;
+      merged.titleAlign = "center";
+    }
   }
   return merged;
 }

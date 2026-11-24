@@ -1220,6 +1220,14 @@ export function App() {
           themeId={themeId}
           wallpaperMode={wallpaperMode}
           onToggleWallpaper={() => void toggleWallpaperMode()}
+          onMoveTitlePosition={(x, y) =>
+            setCinematicConfig((prev) => ({
+              ...prev,
+              titlePosition: "custom",
+              titlePosX: x,
+              titlePosY: y,
+            }))
+          }
           onOpenSettings={() => {
             setShowCinematicSettings(true);
             void refreshMonitors();

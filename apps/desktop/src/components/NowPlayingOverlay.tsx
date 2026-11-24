@@ -1,5 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { CinematicConfig } from "../types";
+import {
+  resolveTitleFontCss,
+  type CinematicConfig,
+  type TitleFontWeight,
+} from "../types";
 
 interface MarqueeLineProps {
   text: string;
@@ -33,7 +37,7 @@ function MarqueeLine({
 
   useLayoutEffect(() => {
     remeasure();
-  }, [text, style?.fontSize, enabled]);
+  }, [text, style?.fontSize, style?.fontFamily, style?.letterSpacing, enabled]);
 
   useEffect(() => {
     const outer = outerRef.current;
@@ -91,12 +95,35 @@ function MarqueeLine({
   );
 }
 
+const FONT_WEIGHT_MAP: Record<TitleFontWeight, number> = {
+  normal: 400,
+  semibold: 600,
+  bold: 700,
+  black: 900,
+};
+
+const SNAP_X_TARGETS = [4, 50, 96];
+const SNAP_Y_TARGETS = [6, 50, 94];
+const SNAP_THRESHOLD = 2.4;
+
+function snapAxis(val: number, targets: number[], freeMode: boolean): [number, number | null] {
+  const clamped = Math.max(0, Math.min(100, val));
+  if (freeMode) return [Math.round(clamped * 10) / 10, null];
+  for (const t of targets) {
+    if (Math.abs(clamped - t) <= SNAP_THRESHOLD) {
+      return [t, t];
+    }
+  }
+  return [Math.round(clamped * 10) / 10, null];
+}
+
 interface NowPlayingOverlayProps {
   config: CinematicConfig;
   title: string;
   artist: string;
   sourceLabel?: string;
   previewMode?: boolean;
+  onMovePosition?: (xPct: number, yPct: number) => void;
 }
 
 export function NowPlayingOverlay({
@@ -105,7 +132,20 @@ export function NowPlayingOverlay({
   artist: rawArtist,
   sourceLabel = "T - MusicPlayer",
   previewMode = false,
+  onMovePosition,
 }: NowPlayingOverlayProps) {
+  const overlayRootRef = useRef<HTMLDivElement | null>(null);
+  const dragStateRef = useRef<{
+    pointerId: number;
+    offsetX: number;
+    offsetY: number;
+  } | null>(null);
+
+  const [dragging, setDragging] = useState(false);
+  const [snapGuideX, setSnapGuideX] = useState<number | null>(null);
+  const [snapGuideY, setSnapGuideY] = useState<number | null>(null);
+  const [shiftHeld, setShiftHeld] = useState(false);
+
   if (config.titlePosition === "hidden") return null;
 
   const title =
@@ -117,61 +157,156 @@ export function NowPlayingOverlay({
   const scaleMult = previewMode ? 0.62 : 1;
   const titlePx = Math.max(10, Math.round(22 * config.titleScale * scaleMult));
   const subPx = Math.max(9, Math.round(13 * config.titleScale * scaleMult));
-  const padY = Math.max(2, Math.round(config.titlePaddingY * scaleMult));
-  const padX = Math.max(6, Math.round(config.titlePaddingX * scaleMult));
+  const padY = config.titleShowBox ? Math.max(2, Math.round(config.titlePaddingY * scaleMult)) : 0;
+  const padX = config.titleShowBox ? Math.max(6, Math.round(config.titlePaddingX * scaleMult)) : 0;
   const maxW = Math.max(120, Math.round(config.titleMaxWidth * (previewMode ? 0.62 : 1)));
   const showSub = (config.showSubtitle || config.showArtistInTitle) && Boolean(subtitle);
   const showBadge =
     config.showMediaSourceBadge && config.titleSource === "auto-media" && Boolean(sourceLabel);
 
-  const posClass =
-    config.titlePosition === "above"
-      ? previewMode
-        ? "top-3 inset-x-4 flex justify-center"
-        : "top-14 inset-x-10 flex justify-center"
-      : config.titlePosition === "below"
-      ? previewMode
-        ? "bottom-4 inset-x-4 flex justify-center"
-        : "bottom-14 inset-x-10 flex justify-center"
-      : config.titlePosition === "bottom-left"
-      ? previewMode
-        ? "bottom-3 left-4 flex justify-start"
-        : "bottom-10 left-10 flex justify-start"
-      : previewMode
-      ? "bottom-3 inset-x-4 flex justify-center"
-      : "bottom-8 inset-x-10 flex justify-center";
+  const posX = Math.max(0, Math.min(100, config.titlePosX ?? 50));
+  const posY = Math.max(0, Math.min(100, config.titlePosY ?? 90));
+  const fontFamily = resolveTitleFontCss(config.titleFontFamily);
+  const fontWeight = FONT_WEIGHT_MAP[config.titleFontWeight ?? "bold"];
+  const letterSpacing = `${(config.titleLetterSpacing ?? 0) * scaleMult}px`;
+  const textTransform = config.titleUppercase ? "uppercase" : "none";
+  const primaryTextColor =
+    config.titleTextColorMode === "custom"
+      ? config.titleCustomColor
+      : "var(--text-primary)";
 
-  const alignClass =
-    config.titlePosition === "bottom-left"
+  const alignItemsClass =
+    config.titleAlign === "left"
       ? "items-start text-left"
+      : config.titleAlign === "right"
+      ? "items-end text-right"
       : "items-center text-center";
 
   const compactCombined = [title, showSub ? subtitle : ""].filter(Boolean).join("  —  ");
+  const isDraggable = Boolean(onMovePosition);
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!onMovePosition || e.button !== 0) return;
+    const root = overlayRootRef.current;
+    if (!root) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const rect = root.getBoundingClientRect();
+    const curPxX = (posX / 100) * rect.width;
+    const curPxY = (posY / 100) * rect.height;
+    dragStateRef.current = {
+      pointerId: e.pointerId,
+      offsetX: e.clientX - rect.left - curPxX,
+      offsetY: e.clientY - rect.top - curPxY,
+    };
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setDragging(true);
+    setShiftHeld(e.shiftKey);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragStateRef.current;
+    if (!drag || !onMovePosition) return;
+    const root = overlayRootRef.current;
+    if (!root) return;
+    const rect = root.getBoundingClientRect();
+    if (rect.width <= 1 || rect.height <= 1) return;
+
+    const rawX = ((e.clientX - rect.left - drag.offsetX) / rect.width) * 100;
+    const rawY = ((e.clientY - rect.top - drag.offsetY) / rect.height) * 100;
+    const free = e.shiftKey;
+    setShiftHeld(free);
+
+    const [nx, guideX] = snapAxis(rawX, SNAP_X_TARGETS, free);
+    const [ny, guideY] = snapAxis(rawY, SNAP_Y_TARGETS, free);
+    setSnapGuideX(guideX);
+    setSnapGuideY(guideY);
+    onMovePosition(nx, ny);
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragStateRef.current;
+    if (!drag) return;
+    dragStateRef.current = null;
+    try {
+      e.currentTarget.releasePointerCapture(drag.pointerId);
+    } catch {
+      // Ignore
+    }
+    setDragging(false);
+    setSnapGuideX(null);
+    setSnapGuideY(null);
+    setShiftHeld(false);
+  };
 
   return (
-    <div className={`absolute z-10 pointer-events-none select-none ${posClass}`}>
+    <div
+      ref={overlayRootRef}
+      className="absolute inset-0 z-10 pointer-events-none select-none overflow-hidden"
+    >
+      {dragging && snapGuideX !== null && (
+        <div
+          className="absolute top-0 bottom-0 w-px pointer-events-none"
+          style={{
+            left: `${snapGuideX}%`,
+            backgroundColor: "var(--accent)",
+            opacity: 0.75,
+          }}
+        />
+      )}
+      {dragging && snapGuideY !== null && (
+        <div
+          className="absolute left-0 right-0 h-px pointer-events-none"
+          style={{
+            top: `${snapGuideY}%`,
+            backgroundColor: "var(--accent)",
+            opacity: 0.75,
+          }}
+        />
+      )}
+
       <div
-        className={`relative flex ${
-          config.titleCompact ? "flex-row items-center gap-2.5" : `flex-col ${alignClass}`
-        } rounded-xl overflow-hidden`}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        onDoubleClick={(e) => e.stopPropagation()}
+        className={`absolute flex ${
+          config.titleCompact ? "flex-row items-center gap-2.5" : `flex-col ${alignItemsClass}`
+        } ${config.titleShowBox ? "rounded-xl" : ""} overflow-hidden ${
+          isDraggable
+            ? dragging
+              ? "pointer-events-auto cursor-grabbing outline-1 outline-dashed outline-[var(--accent)]"
+              : "pointer-events-auto cursor-grab hover:outline-1 hover:outline-dashed hover:outline-[var(--accent)]/60"
+            : "pointer-events-none"
+        }`}
         style={{
+          left: `${posX}%`,
+          top: `${posY}%`,
+          transform: `translate(${-posX}%, ${-posY}%)`,
           maxWidth: `${maxW}px`,
           padding: `${padY}px ${padX}px`,
+          fontFamily,
           backgroundColor:
-            config.titleBoxOpacity > 0.01
+            config.titleShowBox && config.titleBoxOpacity > 0.01
               ? `color-mix(in srgb, var(--bg-elevated) ${Math.round(
                   config.titleBoxOpacity * 100
                 )}%, transparent)`
               : "transparent",
-          border: config.titleShowBorder
-            ? "1px solid var(--border-subtle)"
-            : "1px solid transparent",
+          border:
+            config.titleShowBox && config.titleShowBorder
+              ? "1px solid var(--border-subtle)"
+              : "1px solid transparent",
         }}
+        title={isDraggable ? "Drag to reposition (hold Shift for free placement without snapping)" : undefined}
       >
         {config.titleCompact ? (
           <>
             {showBadge && (
-              <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--accent)] shrink-0">
+              <span
+                className="text-[10px] font-bold uppercase tracking-wider text-[var(--accent)] shrink-0"
+                style={{ fontFamily }}
+              >
                 {sourceLabel}
               </span>
             )}
@@ -180,15 +315,24 @@ export function NowPlayingOverlay({
                 text={compactCombined}
                 enabled={config.titleMarquee}
                 speedPxPerSec={config.titleMarqueeSpeed}
-                className="font-semibold tracking-tight text-[var(--text-primary)] leading-snug"
-                style={{ fontSize: `${titlePx}px` }}
+                className="leading-snug"
+                style={{
+                  fontSize: `${titlePx}px`,
+                  fontWeight,
+                  letterSpacing,
+                  textTransform,
+                  color: primaryTextColor,
+                }}
               />
             </div>
           </>
         ) : (
           <>
             {showBadge && (
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--accent)] mb-0.5 shrink-0">
+              <span
+                className="text-[10px] font-semibold uppercase tracking-wider text-[var(--accent)] mb-0.5 shrink-0"
+                style={{ fontFamily }}
+              >
                 {sourceLabel}
               </span>
             )}
@@ -197,8 +341,14 @@ export function NowPlayingOverlay({
                 text={title}
                 enabled={config.titleMarquee}
                 speedPxPerSec={config.titleMarqueeSpeed}
-                className="font-bold tracking-tight text-[var(--text-primary)] leading-tight"
-                style={{ fontSize: `${titlePx}px` }}
+                className="leading-tight"
+                style={{
+                  fontSize: `${titlePx}px`,
+                  fontWeight,
+                  letterSpacing,
+                  textTransform,
+                  color: primaryTextColor,
+                }}
               />
             )}
             {showSub && (
@@ -206,13 +356,30 @@ export function NowPlayingOverlay({
                 text={subtitle}
                 enabled={config.titleMarquee}
                 speedPxPerSec={config.titleMarqueeSpeed}
-                className="text-[var(--text-secondary)] mt-0.5 leading-snug"
-                style={{ fontSize: `${subPx}px` }}
+                className="mt-0.5 leading-snug"
+                style={{
+                  fontSize: `${subPx}px`,
+                  letterSpacing,
+                  color:
+                    config.titleTextColorMode === "custom"
+                      ? primaryTextColor
+                      : "var(--text-secondary)",
+                  opacity: config.titleTextColorMode === "custom" ? 0.78 : 1,
+                }}
               />
             )}
           </>
         )}
       </div>
+
+      {dragging && (
+        <div className="absolute top-2.5 left-1/2 -translate-x-1/2 px-2.5 py-1 rounded-md bg-[var(--bg-elevated)] border border-[var(--border-subtle)] text-[10px] font-mono-num text-[var(--text-primary)] pointer-events-none">
+          X {posX.toFixed(0)}% · Y {posY.toFixed(0)}%{" "}
+          <span className="text-[var(--accent)]">
+            {shiftHeld ? "(Free · Shift)" : "(Snap On · Hold Shift for Free)"}
+          </span>
+        </div>
+      )}
     </div>
   );
 }

@@ -28,6 +28,7 @@ import { api } from "../services/api";
 import { THEMES } from "../themes";
 import {
   DEFAULT_VISUALIZER_CONFIG,
+  TITLE_FONT_OPTIONS,
   applyPortableTheme,
   stripHostFields,
   type AudioDeviceInfo,
@@ -40,12 +41,13 @@ import {
   type SavedVisualizerTheme,
   type SynthwaveDrawStyle,
   type SynthwaveMode,
+  type TitleFontWeight,
+  type TitleTextAlign,
   type VisualizerBackgroundMode,
   type VisualizerCenterSource,
   type VisualizerColorMode,
   type VisualizerConfig,
   type VisualizerStyleId,
-  type VisualizerTitlePosition,
   type VisualizerTitleSource,
 } from "../types";
 import { CircularVisualizerCanvas } from "./CircularVisualizerCanvas";
@@ -61,6 +63,8 @@ interface CustomizeStudioModalProps {
   onClose: () => void;
   onToggleWallpaper: () => void;
   wallpaperMode: boolean;
+  autostartWallpaper: boolean;
+  onToggleAutostartWallpaper: () => void;
   liveFftRef: React.RefObject<Uint8Array>;
   hasAudioSignal: boolean;
   audioStatus: AudioStatus | null;
@@ -166,6 +170,8 @@ export function CustomizeStudioModal({
   onClose,
   onToggleWallpaper,
   wallpaperMode,
+  autostartWallpaper,
+  onToggleAutostartWallpaper,
   liveFftRef,
   hasAudioSignal,
   audioStatus,
@@ -419,7 +425,19 @@ export function CustomizeStudioModal({
                 previewMode
                 simulatePreview={simulatePreview}
               />
-              <NowPlayingOverlay config={config} nowPlaying={nowPlaying} previewMode />
+              <NowPlayingOverlay
+                config={config}
+                nowPlaying={nowPlaying}
+                previewMode
+                onMovePosition={(x, y) =>
+                  onChange({
+                    ...config,
+                    titlePosition: "custom",
+                    titlePosX: x,
+                    titlePosY: y,
+                  })
+                }
+              />
             </div>
 
             {nowPlaying && (nowPlaying.title || nowPlaying.artist) && (
@@ -1656,6 +1674,13 @@ export function CustomizeStudioModal({
                           ))}
                         </select>
                       </label>
+
+                      <ToggleRow
+                        label="Autostart Wallpaper on Windows Startup"
+                        description="Launch T - Visualizer silently into Live Wallpaper Mode when PC boots"
+                        checked={autostartWallpaper}
+                        onToggle={onToggleAutostartWallpaper}
+                      />
                     </div>
                   </section>
 
@@ -1765,10 +1790,15 @@ export function CustomizeStudioModal({
 
                   {/* Now Playing / Song Text Overlay */}
                   <section className="space-y-3 pt-4 border-t border-[var(--border-subtle)]">
-                    <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)] flex items-center gap-1.5">
-                      <Music2 className="w-3.5 h-3.5 text-[var(--accent)]" />
-                      Now Playing Song Text (Spotify / YouTube / Windows)
-                    </h3>
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)] flex items-center gap-1.5">
+                        <Music2 className="w-3.5 h-3.5 text-[var(--accent)]" />
+                        Now Playing &amp; Free-Drag Textbox
+                      </h3>
+                      <span className="text-[10px] text-[var(--accent)]">
+                        Drag in Preview · Shift = Free
+                      </span>
+                    </div>
 
                     <div className="grid grid-cols-2 gap-1.5">
                       {(
@@ -1792,34 +1822,184 @@ export function CustomizeStudioModal({
                       ))}
                     </div>
 
-                    <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5">
+                    {/* Quick Position Snap Buttons */}
+                    <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => patch("titlePosition", "hidden")}
+                        className={`px-2 py-1.5 rounded-lg text-[11px] font-medium border cursor-pointer ${
+                          config.titlePosition === "hidden"
+                            ? "bg-[var(--accent-soft)] border-[var(--accent)] text-[var(--text-primary)]"
+                            : "bg-[var(--bg-surface)] border-[var(--border-subtle)] text-[var(--text-secondary)]"
+                        }`}
+                      >
+                        Hidden
+                      </button>
                       {(
                         [
-                          ["hidden", "Hidden"],
-                          ["above", "Top"],
-                          ["below", "Below"],
-                          ["bottom-center", "Bottom Ctr"],
-                          ["bottom-left", "Bottom Left"],
-                        ] as [VisualizerTitlePosition, string][]
-                      ).map(([pos, label]) => (
-                        <button
-                          key={pos}
-                          type="button"
-                          onClick={() => patch("titlePosition", pos)}
-                          className={`px-2 py-1.5 rounded-lg text-[11px] font-medium border cursor-pointer ${
-                            config.titlePosition === pos
-                              ? "bg-[var(--accent-soft)] border-[var(--accent)] text-[var(--text-primary)]"
-                              : "bg-[var(--bg-surface)] border-[var(--border-subtle)] text-[var(--text-secondary)]"
-                          }`}
-                        >
-                          {label}
-                        </button>
-                      ))}
+                          ["Top", 50, 8, "center"],
+                          ["Center", 50, 50, "center"],
+                          ["Bottom", 50, 92, "center"],
+                          ["Bot Left", 4, 92, "left"],
+                          ["Bot Right", 96, 92, "right"],
+                        ] as [string, number, number, TitleTextAlign][]
+                      ).map(([label, x, y, align]) => {
+                        const isActive =
+                          config.titlePosition !== "hidden" &&
+                          Math.abs((config.titlePosX ?? 50) - x) < 1.5 &&
+                          Math.abs((config.titlePosY ?? 90) - y) < 1.5;
+                        return (
+                          <button
+                            key={label}
+                            type="button"
+                            onClick={() =>
+                              onChange({
+                                ...config,
+                                titlePosition: "custom",
+                                titlePosX: x,
+                                titlePosY: y,
+                                titleAlign: align,
+                              })
+                            }
+                            className={`px-2 py-1.5 rounded-lg text-[11px] font-medium border cursor-pointer ${
+                              isActive
+                                ? "bg-[var(--accent-soft)] border-[var(--accent)] text-[var(--text-primary)]"
+                                : "bg-[var(--bg-surface)] border-[var(--border-subtle)] text-[var(--text-secondary)]"
+                            }`}
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
                     </div>
 
                     {config.titlePosition !== "hidden" && (
                       <div className="space-y-3">
+                        {/* Font Family Selector */}
+                        <div className="space-y-1.5">
+                          <div className="text-[11px] text-[var(--text-secondary)]">
+                            Font Family
+                          </div>
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                            {TITLE_FONT_OPTIONS.map((f) => (
+                              <button
+                                key={f.id}
+                                type="button"
+                                onClick={() => patch("titleFontFamily", f.id)}
+                                style={{ fontFamily: f.cssFamily }}
+                                className={`px-2 py-1.5 rounded-lg text-[11px] border truncate cursor-pointer ${
+                                  config.titleFontFamily === f.id
+                                    ? "bg-[var(--accent-soft)] border-[var(--accent)] text-[var(--text-primary)]"
+                                    : "bg-[var(--bg-surface)] border-[var(--border-subtle)] text-[var(--text-secondary)]"
+                                }`}
+                              >
+                                {f.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Weight & Alignment */}
                         <div className="grid grid-cols-2 gap-2">
+                          <div className="grid grid-cols-4 gap-1">
+                            {(
+                              [
+                                ["normal", "Reg"],
+                                ["semibold", "Semi"],
+                                ["bold", "Bold"],
+                                ["black", "Heavy"],
+                              ] as [TitleFontWeight, string][]
+                            ).map(([w, lbl]) => (
+                              <button
+                                key={w}
+                                type="button"
+                                onClick={() => patch("titleFontWeight", w)}
+                                className={`px-1.5 py-1.5 rounded-lg text-[11px] font-medium border cursor-pointer ${
+                                  config.titleFontWeight === w
+                                    ? "bg-[var(--accent-soft)] border-[var(--accent)] text-[var(--text-primary)]"
+                                    : "bg-[var(--bg-surface)] border-[var(--border-subtle)] text-[var(--text-secondary)]"
+                                }`}
+                              >
+                                {lbl}
+                              </button>
+                            ))}
+                          </div>
+
+                          <div className="grid grid-cols-3 gap-1">
+                            {(
+                              [
+                                ["left", "Left"],
+                                ["center", "Center"],
+                                ["right", "Right"],
+                              ] as [TitleTextAlign, string][]
+                            ).map(([a, lbl]) => (
+                              <button
+                                key={a}
+                                type="button"
+                                onClick={() => patch("titleAlign", a)}
+                                className={`px-1.5 py-1.5 rounded-lg text-[11px] font-medium border cursor-pointer ${
+                                  config.titleAlign === a
+                                    ? "bg-[var(--accent-soft)] border-[var(--accent)] text-[var(--text-primary)]"
+                                    : "bg-[var(--bg-surface)] border-[var(--border-subtle)] text-[var(--text-secondary)]"
+                                }`}
+                              >
+                                {lbl}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Text Color */}
+                        <div className="grid grid-cols-2 gap-2 items-center">
+                          <div className="grid grid-cols-2 gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => patch("titleTextColorMode", "theme")}
+                              className={`px-2 py-1.5 rounded-lg text-xs font-medium border cursor-pointer ${
+                                config.titleTextColorMode === "theme"
+                                  ? "bg-[var(--accent-soft)] border-[var(--accent)] text-[var(--text-primary)]"
+                                  : "bg-[var(--bg-surface)] border-[var(--border-subtle)] text-[var(--text-secondary)]"
+                              }`}
+                            >
+                              Theme Text
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => patch("titleTextColorMode", "custom")}
+                              className={`px-2 py-1.5 rounded-lg text-xs font-medium border cursor-pointer ${
+                                config.titleTextColorMode === "custom"
+                                  ? "bg-[var(--accent-soft)] border-[var(--accent)] text-[var(--text-primary)]"
+                                  : "bg-[var(--bg-surface)] border-[var(--border-subtle)] text-[var(--text-secondary)]"
+                              }`}
+                            >
+                              Custom Color
+                            </button>
+                          </div>
+                          {config.titleTextColorMode === "custom" && (
+                            <label className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-xs cursor-pointer">
+                              <span className="text-[var(--text-secondary)]">Text Color</span>
+                              <input
+                                type="color"
+                                value={config.titleCustomColor}
+                                onChange={(e) => patch("titleCustomColor", e.target.value)}
+                                className="w-6 h-6 rounded bg-transparent border-0 cursor-pointer"
+                              />
+                            </label>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <ToggleRow
+                            label="Show Background Box"
+                            description="Off = pure floating text only"
+                            checked={config.titleShowBox}
+                            onToggle={() => patch("titleShowBox", !config.titleShowBox)}
+                          />
+                          <ToggleRow
+                            label="UPPERCASE Title"
+                            checked={config.titleUppercase}
+                            onToggle={() => patch("titleUppercase", !config.titleUppercase)}
+                          />
                           <ToggleRow
                             label="Show Artist"
                             checked={config.showSubtitle}
@@ -1839,29 +2019,62 @@ export function CustomizeStudioModal({
                             onToggle={() => patch("titleCompact", !config.titleCompact)}
                           />
                           <ToggleRow
-                            label="Show Box Border"
-                            checked={config.titleShowBorder}
-                            onToggle={() =>
-                              patch("titleShowBorder", !config.titleShowBorder)
-                            }
-                          />
-                          <ToggleRow
                             label="Scroll Loop (Marquee)"
                             description="Loop text when wider than Max Width"
                             checked={config.titleMarquee}
                             onToggle={() => patch("titleMarquee", !config.titleMarquee)}
                           />
+                          {config.titleShowBox && (
+                            <ToggleRow
+                              label="Show Box Border"
+                              checked={config.titleShowBorder}
+                              onToggle={() =>
+                                patch("titleShowBorder", !config.titleShowBorder)
+                              }
+                            />
+                          )}
                         </div>
 
                         <div className="grid grid-cols-2 gap-4">
                           <SliderRow
+                            label="Position X"
+                            value={config.titlePosX}
+                            min={0}
+                            max={100}
+                            step={1}
+                            unit="%"
+                            onChange={(v) =>
+                              onChange({ ...config, titlePosition: "custom", titlePosX: v })
+                            }
+                          />
+                          <SliderRow
+                            label="Position Y"
+                            value={config.titlePosY}
+                            min={0}
+                            max={100}
+                            step={1}
+                            unit="%"
+                            onChange={(v) =>
+                              onChange({ ...config, titlePosition: "custom", titlePosY: v })
+                            }
+                          />
+                          <SliderRow
                             label="Text Size"
                             value={config.titleScale}
                             min={0.6}
-                            max={2.0}
+                            max={2.4}
                             step={0.05}
                             unit="x"
                             onChange={(v) => patch("titleScale", v)}
+                          />
+                          <SliderRow
+                            label="Letter Spacing"
+                            value={config.titleLetterSpacing}
+                            min={-1}
+                            max={8}
+                            step={0.5}
+                            unit="px"
+                            onChange={(v) => patch("titleLetterSpacing", v)}
                           />
                           <SliderRow
                             label="Max Box Width"
@@ -1871,32 +2084,6 @@ export function CustomizeStudioModal({
                             step={10}
                             unit="px"
                             onChange={(v) => patch("titleMaxWidth", v)}
-                          />
-                          <SliderRow
-                            label="Box Thickness (Pad Y)"
-                            value={config.titlePaddingY}
-                            min={2}
-                            max={18}
-                            step={1}
-                            unit="px"
-                            onChange={(v) => patch("titlePaddingY", v)}
-                          />
-                          <SliderRow
-                            label="Side Padding (Pad X)"
-                            value={config.titlePaddingX}
-                            min={6}
-                            max={36}
-                            step={2}
-                            unit="px"
-                            onChange={(v) => patch("titlePaddingX", v)}
-                          />
-                          <SliderRow
-                            label="Box Background Opacity"
-                            value={config.titleBoxOpacity}
-                            min={0}
-                            max={1.0}
-                            step={0.05}
-                            onChange={(v) => patch("titleBoxOpacity", v)}
                           />
                           {config.titleMarquee && (
                             <SliderRow
@@ -1908,6 +2095,36 @@ export function CustomizeStudioModal({
                               unit="px/s"
                               onChange={(v) => patch("titleMarqueeSpeed", v)}
                             />
+                          )}
+                          {config.titleShowBox && (
+                            <>
+                              <SliderRow
+                                label="Box Thickness (Pad Y)"
+                                value={config.titlePaddingY}
+                                min={2}
+                                max={18}
+                                step={1}
+                                unit="px"
+                                onChange={(v) => patch("titlePaddingY", v)}
+                              />
+                              <SliderRow
+                                label="Side Padding (Pad X)"
+                                value={config.titlePaddingX}
+                                min={6}
+                                max={36}
+                                step={2}
+                                unit="px"
+                                onChange={(v) => patch("titlePaddingX", v)}
+                              />
+                              <SliderRow
+                                label="Box Background Opacity"
+                                value={config.titleBoxOpacity}
+                                min={0}
+                                max={1.0}
+                                step={0.05}
+                                onChange={(v) => patch("titleBoxOpacity", v)}
+                              />
+                            </>
                           )}
                         </div>
 

@@ -3,6 +3,7 @@
 //! Live Desktop Wallpaper mode.
 
 mod audio;
+mod autostart;
 mod media;
 mod wallpaper;
 
@@ -145,6 +146,21 @@ fn read_text_file(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn get_autostart_wallpaper() -> bool {
+    autostart::is_autostart_wallpaper_enabled()
+}
+
+#[tauri::command]
+fn set_autostart_wallpaper(enabled: bool) -> Result<bool, String> {
+    autostart::set_autostart_wallpaper_enabled(enabled)
+}
+
+#[tauri::command]
+fn launched_in_wallpaper_autostart() -> bool {
+    autostart::has_wallpaper_launch_flag()
+}
+
+#[tauri::command]
 fn hide_main_window(app: AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
@@ -255,6 +271,15 @@ pub fn run() {
             }
             let _ = tray_builder.build(app)?;
 
+            // When launched via Windows Startup (`--wallpaper`), hide `main` immediately
+            // so there is zero window flash on PC boot; frontend hydrates saved settings
+            // and enters Live Wallpaper Mode automatically.
+            if autostart::has_wallpaper_launch_flag() {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -273,6 +298,9 @@ pub fn run() {
             load_image_as_data_url,
             save_text_file,
             read_text_file,
+            get_autostart_wallpaper,
+            set_autostart_wallpaper,
+            launched_in_wallpaper_autostart,
             hide_main_window,
             quit_app,
         ])

@@ -13,6 +13,7 @@ interface CinematicOverlayProps {
   themeId: string;
   wallpaperMode: boolean;
   onToggleWallpaper: () => void;
+  onMoveTitlePosition?: (xPct: number, yPct: number) => void;
   onOpenSettings: () => void;
   onExit: () => void;
 }
@@ -25,6 +26,7 @@ export function CinematicOverlay({
   themeId,
   wallpaperMode,
   onToggleWallpaper,
+  onMoveTitlePosition,
   onOpenSettings,
   onExit,
 }: CinematicOverlayProps) {
@@ -133,6 +135,7 @@ export function CinematicOverlay({
           title={autoTitle}
           artist={autoArtist}
           sourceLabel={nowPlaying?.kind === "radio" ? "Internet Radio" : "T - MusicPlayer"}
+          onMovePosition={onMoveTitlePosition}
         />
       </div>
     </div>

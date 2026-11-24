@@ -57,6 +57,14 @@ export const api = {
 
   readTextFile: (path: string) => invoke<string>("read_text_file", { path }),
 
+  getAutostartWallpaper: () => invoke<boolean>("get_autostart_wallpaper"),
+
+  setAutostartWallpaper: (enabled: boolean) =>
+    invoke<boolean>("set_autostart_wallpaper", { enabled }),
+
+  launchedInWallpaperAutostart: () =>
+    invoke<boolean>("launched_in_wallpaper_autostart"),
+
   hideMainWindow: () => invoke<void>("hide_main_window"),
 
   quitApp: () => invoke<void>("quit_app"),
