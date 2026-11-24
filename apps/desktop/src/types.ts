@@ -138,71 +138,50 @@ export type PlayingItem =
   | { kind: "track"; track: Track }
   | { kind: "radio"; station: RadioStation };
 
-export type CinematicColorMode =
-  | "theme"
-  | "solid"
-  | "height-dynamic"
-  | "radial-fade"
-  | "rainbow";
+import {
+  DEFAULT_VISUALIZER_CONFIG,
+  type VisualizerCenterSource,
+  type VisualizerColorMode,
+  type VisualizerConfig,
+  type VisualizerTitlePosition,
+} from "@shared/visualizer/types";
 
-export type CinematicTitlePosition = "hidden" | "above" | "below";
+export * from "@shared/visualizer/types";
 
-export type CinematicCenterSource =
-  | "auto"
-  | "tpx"
-  | "album-art"
-  | "music-icon"
-  | "custom";
-
-export interface CinematicConfig {
-  circleSize: number;
-  barGapFromCircle: number;
-  barCount: number;
-  barMaxHeight: number;
-  barThickness: number;
-  barSensitivity: number;
-  barSmoothing: number;
-  mirrored: boolean;
-  bidirectionalBars: boolean;
-  colorMode: CinematicColorMode;
-  barColorLow: string;
-  barColorMid: string;
-  barColorHigh: string;
-  roundedCaps: boolean;
-  bassPulse: boolean;
-  rotationSpeed: number;
-  showCircleRing: boolean;
-  titlePosition: CinematicTitlePosition;
-  showArtistInTitle: boolean;
-  centerSource: CinematicCenterSource;
-  customImageHash: string | null;
-  enterFullscreen: boolean;
-}
+export type CinematicColorMode = VisualizerColorMode;
+export type CinematicTitlePosition = VisualizerTitlePosition;
+export type CinematicCenterSource = VisualizerCenterSource;
+export type CinematicConfig = VisualizerConfig;
 
 export const DEFAULT_CINEMATIC_CONFIG: CinematicConfig = {
-  circleSize: 200,
-  barGapFromCircle: 14,
-  barCount: 72,
-  barMaxHeight: 120,
-  barThickness: 4.5,
-  barSensitivity: 1.35,
-  barSmoothing: 0.72,
-  mirrored: true,
-  bidirectionalBars: false,
-  colorMode: "theme",
-  barColorLow: "#0AF92A",
-  barColorMid: "#49ECC1",
-  barColorHigh: "#FFB020",
-  roundedCaps: true,
-  bassPulse: true,
-  rotationSpeed: 0.15,
-  showCircleRing: true,
-  titlePosition: "below",
-  showArtistInTitle: true,
+  ...DEFAULT_VISUALIZER_CONFIG,
   centerSource: "auto",
-  customImageHash: null,
+  titlePosition: "below",
+  titleSource: "auto-media",
+  showSubtitle: true,
+  showArtistInTitle: true,
   enterFullscreen: true,
 };
+
+export interface MonitorInfo {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  is_primary: boolean;
+}
+
+export interface DesktopWallpaperPayload {
+  config: CinematicConfig;
+  themeId: string;
+  isPlaying: boolean;
+  isRadio: boolean;
+  title: string;
+  artist: string;
+  coverUrl: string | null;
+}
 
 export interface UserProfile {
   id: string;

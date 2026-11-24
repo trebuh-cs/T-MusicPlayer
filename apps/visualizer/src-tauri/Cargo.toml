@@ -3,7 +3,7 @@
 [package]
 name = "t-music-visualizer"
 version = "0.1.0"
-description = "Standalone Windows system-audio circular visualizer with Live Desktop Wallpaper mode"
+description = "Standalone Windows system-audio visualizer with multi-monitor Live Desktop Wallpaper mode and Now Playing detection"
 authors = ["Tristan"]
 edition = "2021"
 
@@ -24,6 +24,10 @@ tauri-plugin-dialog = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Media_Control",
+    "Storage_Streams",
     "Win32_Devices_FunctionDiscovery",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

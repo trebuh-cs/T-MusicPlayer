@@ -1,7 +1,9 @@
-//! Tauri v2 standalone Windows visualizer with WASAPI loopback FFT, System Tray, and
-//! multi-monitor native-resolution Live Desktop Wallpaper mode.
+//! Tauri v2 standalone Windows visualizer with WASAPI loopback FFT, Windows GSMTC Now Playing
+//! detection, portable .tviz theme export/import, System Tray, and multi-monitor native-resolution
+//! Live Desktop Wallpaper mode.
 
 mod audio;
+mod media;
 mod wallpaper;
 
 use std::fs;
@@ -14,6 +16,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewWindow};
 
 use crate::audio::{AudioDeviceInfo, AudioEngine, AudioStatus};
+use crate::media::{MediaTracker, NowPlayingMedia};
 use crate::wallpaper::{MonitorInfo, WallpaperManager};
 
 struct SyncedConfigState(Mutex<Option<String>>);
@@ -36,6 +39,11 @@ fn list_audio_devices(audio: State<'_, AudioEngine>) -> Vec<AudioDeviceInfo> {
 #[tauri::command]
 fn select_audio_device(audio: State<'_, AudioEngine>, device_id: Option<String>) {
     audio.select_device(device_id);
+}
+
+#[tauri::command]
+fn get_now_playing(tracker: State<'_, MediaTracker>) -> Option<NowPlayingMedia> {
+    tracker.get_current()
 }
 
 #[tauri::command]
@@ -82,10 +90,7 @@ fn get_synced_visualizer_config(cfg_state: State<'_, SyncedConfigState>) -> Opti
 }
 
 #[tauri::command]
-fn set_window_fullscreen(
-    window: WebviewWindow,
-    fullscreen: bool,
-) -> Result<bool, String> {
+fn set_window_fullscreen(window: WebviewWindow, fullscreen: bool) -> Result<bool, String> {
     window
         .set_fullscreen(fullscreen)
         .map_err(|e| format!("Failed toggling fullscreen: {e}"))?;
@@ -126,6 +131,20 @@ fn load_image_as_data_url(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn save_text_file(path: String, content: String) -> Result<(), String> {
+    fs::write(&path, content.as_bytes()).map_err(|e| format!("Failed saving file: {e}"))
+}
+
+#[tauri::command]
+fn read_text_file(path: String) -> Result<String, String> {
+    let meta = fs::metadata(&path).map_err(|e| format!("Failed reading file: {e}"))?;
+    if meta.len() > 30 * 1024 * 1024 {
+        return Err("Theme file is larger than 30 MB.".to_string());
+    }
+    fs::read_to_string(&path).map_err(|e| format!("Failed reading file: {e}"))
+}
+
+#[tauri::command]
 fn hide_main_window(app: AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
@@ -136,8 +155,8 @@ fn hide_main_window(app: AppHandle) {
 fn quit_app(app: AppHandle) {
     let wp = app.state::<WallpaperManager>();
     let _ = wp.exit(&app, false);
-    let audio = app.state::<AudioEngine>();
-    audio.stop();
+    app.state::<AudioEngine>().stop();
+    app.state::<MediaTracker>().stop();
     app.exit(0);
 }
 
@@ -147,6 +166,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             app.manage(AudioEngine::start());
+            app.manage(MediaTracker::start());
             app.manage(WallpaperManager::new());
             app.manage(SyncedConfigState(Mutex::new(None)));
 
@@ -209,6 +229,7 @@ pub fn run() {
                         let wp = app.state::<WallpaperManager>();
                         let _ = wp.exit(app, false);
                         app.state::<AudioEngine>().stop();
+                        app.state::<MediaTracker>().stop();
                         app.exit(0);
                     }
                     _ => {}
@@ -241,6 +262,7 @@ pub fn run() {
             get_audio_status,
             list_audio_devices,
             select_audio_device,
+            get_now_playing,
             list_monitors,
             is_wallpaper_mode,
             set_wallpaper_mode,
@@ -249,6 +271,8 @@ pub fn run() {
             set_window_fullscreen,
             is_window_fullscreen,
             load_image_as_data_url,
+            save_text_file,
+            read_text_file,
             hide_main_window,
             quit_app,
         ])
@@ -260,6 +284,7 @@ pub fn run() {
             let wp = app_handle.state::<WallpaperManager>();
             let _ = wp.exit(app_handle, false);
             app_handle.state::<AudioEngine>().stop();
+            app_handle.state::<MediaTracker>().stop();
         }
     });
 }

@@ -29,14 +29,18 @@ import {
 } from "./themes/themes";
 import {
   DEFAULT_CINEMATIC_CONFIG,
+  mergeVisualizerConfig,
   type ActiveView,
   type AutoPlaylistConfig,
   type CinematicConfig,
+  type DesktopWallpaperPayload,
   type EqSettings,
+  type MonitorInfo,
   type MusicFolder,
   type Playlist,
   type RadioStation,
   type RepeatMode,
+  type SavedVisualizerTheme,
   type SyncProgressEvent,
   type SyncSummary,
   type Track,
@@ -74,6 +78,11 @@ export function App() {
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [cinematicMode, setCinematicMode] = useState(false);
+  const [wallpaperMode, setWallpaperMode] = useState(false);
+  const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
+  const [savedVisualizerThemes, setSavedVisualizerThemes] = useState<
+    SavedVisualizerTheme[]
+  >([]);
   const [showCinematicSettings, setShowCinematicSettings] = useState(false);
   const [showWmpModal, setShowWmpModal] = useState(false);
   const [showThemeDrawer, setShowThemeDrawer] = useState(false);
@@ -247,7 +256,19 @@ export function App() {
 
       const parsedCinematic = parseJsonSetting<CinematicConfig>(s.cinematic_config);
       if (parsedCinematic) {
-        setCinematicConfig({ ...DEFAULT_CINEMATIC_CONFIG, ...parsedCinematic });
+        setCinematicConfig(
+          mergeVisualizerConfig(parsedCinematic, DEFAULT_CINEMATIC_CONFIG)
+        );
+      }
+      if (s.visualizer_saved_themes) {
+        try {
+          const parsedThemes = JSON.parse(s.visualizer_saved_themes);
+          if (Array.isArray(parsedThemes)) {
+            setSavedVisualizerThemes(parsedThemes as SavedVisualizerTheme[]);
+          }
+        } catch {
+          // Ignore malformed saved themes
+        }
       }
 
       const parsedVol = s.volume !== undefined ? Number(s.volume) : undefined;
@@ -489,6 +510,143 @@ export function App() {
       }
     }
   }, []);
+
+  const refreshMonitors = useCallback(async () => {
+    try {
+      const [mons, active] = await Promise.all([
+        api.listMonitors(),
+        api.isWallpaperMode(),
+      ]);
+      setMonitors(mons);
+      setWallpaperMode(active);
+    } catch {
+      // Ignore on non-Windows hosts
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshMonitors();
+  }, [refreshMonitors]);
+
+  const buildWallpaperPayload = useCallback(
+    (overrideConfig?: CinematicConfig): DesktopWallpaperPayload => {
+      const np = engine.nowPlaying;
+      const title =
+        np?.kind === "track"
+          ? np.track.title
+          : np?.kind === "radio"
+          ? np.station.name
+          : "";
+      const artist =
+        np?.kind === "track"
+          ? np.track.artist
+          : np?.kind === "radio"
+          ? "Live Internet Radio"
+          : "";
+      const coverUrl =
+        np?.kind === "track"
+          ? getCoverUrl(np.track.cover_hash)
+          : np?.kind === "radio"
+          ? np.station.favicon
+          : null;
+      return {
+        config: overrideConfig ?? cinematicConfig,
+        themeId,
+        isPlaying: engine.isPlaying,
+        isRadio: np?.kind === "radio",
+        title,
+        artist,
+        coverUrl,
+      };
+    },
+    [cinematicConfig, themeId, engine.isPlaying, engine.nowPlaying]
+  );
+
+  // Sync live visualizer config, theme, track metadata & cover to all running wallpaper monitors
+  useEffect(() => {
+    if (!wallpaperMode) return;
+    void api
+      .syncWallpaperPayload(JSON.stringify(buildWallpaperPayload()))
+      .catch(() => {});
+  }, [wallpaperMode, buildWallpaperPayload]);
+
+  // Stream 60fps FFT spectrum frames from the player's AnalyserNode to the desktop wallpaper surfaces
+  useEffect(() => {
+    if (!wallpaperMode) return;
+    let cancelled = false;
+    let inFlight = false;
+    let rafId = 0;
+    const freqBuf = new Uint8Array(256);
+
+    const pushFrame = () => {
+      if (cancelled) return;
+      if (!inFlight) {
+        const analyser = engine.analyserRef.current;
+        if (analyser && engine.isPlaying && engine.nowPlaying?.kind !== "radio") {
+          analyser.getByteFrequencyData(freqBuf);
+        } else {
+          freqBuf.fill(0);
+        }
+        inFlight = true;
+        api
+          .pushWallpaperFft(Array.from(freqBuf))
+          .catch(() => {})
+          .finally(() => {
+            inFlight = false;
+          });
+      }
+      rafId = requestAnimationFrame(pushFrame);
+    };
+
+    rafId = requestAnimationFrame(pushFrame);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(rafId);
+    };
+  }, [wallpaperMode, engine.analyserRef, engine.isPlaying, engine.nowPlaying]);
+
+  const toggleWallpaperMode = useCallback(async () => {
+    try {
+      const target = !wallpaperMode;
+      if (target) {
+        await api.syncWallpaperPayload(JSON.stringify(buildWallpaperPayload()));
+      }
+      const active = await api.setWallpaperMode(
+        target,
+        cinematicConfig.selectedMonitorId
+      );
+      setWallpaperMode(active);
+      if (active) {
+        void api.syncWallpaperPayload(JSON.stringify(buildWallpaperPayload()));
+      }
+    } catch (err) {
+      setBannerMsg(`Live Wallpaper error: ${String(err)}`);
+    }
+  }, [wallpaperMode, cinematicConfig.selectedMonitorId, buildWallpaperPayload]);
+
+  const handleSelectWallpaperMonitor = useCallback(
+    async (monitorId: string | null) => {
+      if (!wallpaperMode) return;
+      try {
+        const nextCfg = { ...cinematicConfig, selectedMonitorId: monitorId };
+        await api.syncWallpaperPayload(
+          JSON.stringify(buildWallpaperPayload(nextCfg))
+        );
+        await api.setWallpaperMode(true, monitorId);
+      } catch (err) {
+        setBannerMsg(`Live Wallpaper error: ${String(err)}`);
+      }
+    },
+    [wallpaperMode, cinematicConfig, buildWallpaperPayload]
+  );
+
+  const handleSaveVisualizerThemes = useCallback(
+    (next: SavedVisualizerTheme[]) => {
+      setSavedVisualizerThemes(next);
+      scheduleSettingWrite("visualizer_saved_themes", JSON.stringify(next), true);
+    },
+    [scheduleSettingWrite]
+  );
 
   // Global keyboard shortcuts: Space play/pause, F11 fullscreen, Escape exit cinematic/modals.
   useEffect(() => {
@@ -877,12 +1035,17 @@ export function App() {
             syncProgress={syncProgress}
             isServerConnected={isServerConnected}
             isFullscreen={isFullscreen}
+            wallpaperMode={wallpaperMode}
             onAddFolder={() => void handleAddFolder()}
             onRescan={() => void handleRescan()}
             onSyncNow={() => void handleSyncNow(false)}
             onOpenThemes={() => setShowThemeDrawer(true)}
             onEnterCinematic={() => void enterCinematicMode()}
-            onOpenCinematicSettings={() => setShowCinematicSettings(true)}
+            onToggleWallpaper={() => void toggleWallpaperMode()}
+            onOpenCinematicSettings={() => {
+              setShowCinematicSettings(true);
+              void refreshMonitors();
+            }}
             onToggleFullscreen={() => void toggleFullscreen()}
             onBeforeClose={flushPendingSettings}
             activeThemeName={activeTheme.name}
@@ -1055,7 +1218,12 @@ export function App() {
           analyserRef={engine.analyserRef}
           isPlaying={engine.isPlaying}
           themeId={themeId}
-          onOpenSettings={() => setShowCinematicSettings(true)}
+          wallpaperMode={wallpaperMode}
+          onToggleWallpaper={() => void toggleWallpaperMode()}
+          onOpenSettings={() => {
+            setShowCinematicSettings(true);
+            void refreshMonitors();
+          }}
           onExit={() => void exitCinematicMode()}
         />
       )}
@@ -1064,12 +1232,20 @@ export function App() {
         <CinematicSettingsModal
           config={cinematicConfig}
           onChange={setCinematicConfig}
+          savedThemes={savedVisualizerThemes}
+          onSaveThemes={handleSaveVisualizerThemes}
           onLaunchCinematic={() => void enterCinematicMode()}
+          onToggleWallpaper={() => void toggleWallpaperMode()}
+          wallpaperMode={wallpaperMode}
+          monitors={monitors}
+          onRefreshMonitors={() => void refreshMonitors()}
+          onSelectMonitor={(id) => void handleSelectWallpaperMonitor(id)}
           onClose={() => setShowCinematicSettings(false)}
           analyserRef={engine.analyserRef}
           isPlaying={engine.isPlaying}
           nowPlaying={engine.nowPlaying}
           themeId={themeId}
+          onSelectAppTheme={handleSelectTheme}
         />
       )}
 

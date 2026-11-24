@@ -3,22 +3,131 @@
 mod commands;
 mod db;
 mod sync;
+mod wallpaper;
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Mutex;
 
+use base64::Engine as _;
 use http::{Method, Request, Response, StatusCode};
-use tauri::Manager;
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 
 use crate::db::Database;
+use crate::wallpaper::{MonitorInfo, WallpaperManager};
 
 const MAX_STREAM_CHUNK_BYTES: u64 = 4 * 1024 * 1024;
+
+struct WallpaperFftBuffer(Mutex<[u8; 256]>);
+struct WallpaperPayloadState(Mutex<Option<String>>);
+
+#[tauri::command]
+fn list_monitors(wp: State<'_, WallpaperManager>) -> Vec<MonitorInfo> {
+    wp.list_monitors()
+}
+
+#[tauri::command]
+fn is_wallpaper_mode(wp: State<'_, WallpaperManager>) -> bool {
+    wp.is_active()
+}
+
+#[tauri::command]
+async fn set_wallpaper_mode(
+    app: AppHandle,
+    wp: State<'_, WallpaperManager>,
+    enabled: bool,
+    monitor_id: Option<String>,
+) -> Result<bool, String> {
+    if enabled {
+        // Keep the T - MusicPlayer main window visible so the user can keep browsing music
+        // while the live visualizer runs behind desktop icons.
+        wp.enter(&app, monitor_id, false)
+    } else {
+        wp.exit(&app, false)
+    }
+}
+
+#[tauri::command]
+fn push_wallpaper_fft(fft: State<'_, WallpaperFftBuffer>, bins: Vec<u8>) {
+    if let Ok(mut guard) = fft.0.lock() {
+        let len = bins.len().min(256);
+        guard[..len].copy_from_slice(&bins[..len]);
+        if len < 256 {
+            guard[len..].fill(0);
+        }
+    }
+}
+
+#[tauri::command]
+fn get_wallpaper_fft(fft: State<'_, WallpaperFftBuffer>) -> tauri::ipc::Response {
+    let snapshot = fft
+        .0
+        .lock()
+        .map(|g| g.to_vec())
+        .unwrap_or_else(|_| vec![0u8; 256]);
+    tauri::ipc::Response::new(snapshot)
+}
+
+#[tauri::command]
+fn sync_wallpaper_payload(
+    app: AppHandle,
+    state: State<'_, WallpaperPayloadState>,
+    payload_json: String,
+) {
+    if let Ok(mut guard) = state.0.lock() {
+        *guard = Some(payload_json.clone());
+    }
+    let _ = app.emit("desktop-wallpaper-payload", payload_json);
+}
+
+#[tauri::command]
+fn get_wallpaper_payload(state: State<'_, WallpaperPayloadState>) -> Option<String> {
+    state.0.lock().ok().and_then(|g| g.clone())
+}
+
+#[tauri::command]
+fn load_image_as_data_url(path: String) -> Result<String, String> {
+    let img_path = Path::new(&path);
+    let data = fs::read(img_path).map_err(|e| format!("Failed reading image: {e}"))?;
+    if data.len() > 18 * 1024 * 1024 {
+        return Err("Image is larger than 18 MB. Please pick a smaller image.".to_string());
+    }
+    let mime = match img_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("gif") => "image/gif",
+        _ => return Err("Unsupported image format (use PNG, JPG, WebP, SVG, or GIF).".to_string()),
+    };
+    let b64 = base64::engine::general_purpose::STANDARD.encode(data);
+    Ok(format!("data:{mime};base64,{b64}"))
+}
+
+#[tauri::command]
+fn save_text_file(path: String, content: String) -> Result<(), String> {
+    fs::write(&path, content.as_bytes()).map_err(|e| format!("Failed saving file: {e}"))
+}
+
+#[tauri::command]
+fn read_text_file(path: String) -> Result<String, String> {
+    let meta = fs::metadata(&path).map_err(|e| format!("Failed reading file: {e}"))?;
+    if meta.len() > 30 * 1024 * 1024 {
+        return Err("Theme file is larger than 30 MB.".to_string());
+    }
+    fs::read_to_string(&path).map_err(|e| format!("Failed reading file: {e}"))
+}
 
 /// Runs the Tauri v2 desktop application.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_data_dir = app
@@ -28,6 +137,9 @@ pub fn run() {
             let db_path = app_data_dir.join("t-music-library.db");
             let database = Database::open(&db_path)?;
             app.manage(database);
+            app.manage(WallpaperManager::new());
+            app.manage(WallpaperFftBuffer(Mutex::new([0u8; 256])));
+            app.manage(WallpaperPayloadState(Mutex::new(None)));
             Ok(())
         })
         .register_asynchronous_uri_scheme_protocol("tmusic", |ctx, request, responder| {
@@ -76,9 +188,26 @@ pub fn run() {
             commands::reset_track_edit,
             commands::reveal_track_in_explorer,
             commands::export_track_as_mp3,
+            list_monitors,
+            is_wallpaper_mode,
+            set_wallpaper_mode,
+            push_wallpaper_fft,
+            get_wallpaper_fft,
+            sync_wallpaper_payload,
+            get_wallpaper_payload,
+            load_image_as_data_url,
+            save_text_file,
+            read_text_file,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running T - MusicPlayer");
+        .build(tauri::generate_context!())
+        .expect("error while building T - MusicPlayer");
+
+    app.run(|app_handle, event| {
+        if let RunEvent::Exit = event {
+            let wp = app_handle.state::<WallpaperManager>();
+            let _ = wp.exit(app_handle, false);
+        }
+    });
 }
 
 fn handle_tmusic_protocol(db: &Database, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {

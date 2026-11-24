@@ -317,7 +317,7 @@ mod win_wallpaper {
         /// under `Progman` OR classic Win10/Win11 <=23H2 sibling `WorkerW` behind `SHELLDLL_DefView`).
         /// WebView2 DirectComposition renders natively inside `WorkerW` without `WS_EX_LAYERED`,
         /// and `SHELLDLL_DefView` (desktop icons) is never touched.
-        WorkerW { workerw: isize, is_child_of_progman: bool },
+        WorkerW { workerw: isize, #[allow(dead_code)] is_child_of_progman: bool },
         /// Safe fallback if shell hides WorkerW: bottom-most borderless desktop window.
         FallbackBottom,
     }

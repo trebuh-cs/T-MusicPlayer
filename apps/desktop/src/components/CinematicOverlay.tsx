@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Sliders, X } from "lucide-react";
+import { Sliders, Wallpaper, X } from "lucide-react";
 import { getCoverUrl } from "../services/api";
 import type { CinematicConfig, PlayingItem } from "../types";
 import { CircularVisualizerCanvas } from "./CircularVisualizerCanvas";
@@ -10,6 +10,8 @@ interface CinematicOverlayProps {
   analyserRef: React.RefObject<AnalyserNode | null>;
   isPlaying: boolean;
   themeId: string;
+  wallpaperMode: boolean;
+  onToggleWallpaper: () => void;
   onOpenSettings: () => void;
   onExit: () => void;
 }
@@ -20,6 +22,8 @@ export function CinematicOverlay({
   analyserRef,
   isPlaying,
   themeId,
+  wallpaperMode,
+  onToggleWallpaper,
   onOpenSettings,
   onExit,
 }: CinematicOverlayProps) {
@@ -49,46 +53,68 @@ export function CinematicOverlay({
       ? nowPlaying.station.favicon
       : null;
 
-  const title =
+  const autoTitle =
     nowPlaying?.kind === "track"
       ? nowPlaying.track.title
       : nowPlaying?.kind === "radio"
       ? nowPlaying.station.name
       : "T - MusicPlayer";
 
-  const artist =
+  const autoArtist =
     nowPlaying?.kind === "track"
       ? nowPlaying.track.artist
       : nowPlaying?.kind === "radio"
       ? "Live Internet Radio"
       : "";
 
-  const titleBlock = config.titlePosition !== "hidden" && (
-    <div className="text-center px-6 py-2 max-w-2xl mx-auto shrink-0 select-none">
-      <div className="text-xl md:text-2xl font-bold tracking-tight text-[var(--text-primary)] truncate">
-        {title}
-      </div>
-      {config.showArtistInTitle && artist && (
-        <div className="text-xs md:text-sm text-[var(--text-secondary)] mt-0.5 truncate">
-          {artist}
-        </div>
-      )}
-    </div>
-  );
+  const displayTitle =
+    config.titleSource === "custom" ? config.customTitle.trim() : autoTitle;
+  const displayArtist =
+    config.titleSource === "custom" ? config.customSubtitle.trim() : autoArtist;
+  const showSub = config.showSubtitle || config.showArtistInTitle;
+
+  const titlePosClass =
+    config.titlePosition === "above"
+      ? "top-12 inset-x-10 text-center"
+      : config.titlePosition === "below"
+      ? "bottom-14 inset-x-10 text-center"
+      : config.titlePosition === "bottom-left"
+      ? "bottom-10 left-10 max-w-[60vw] text-left"
+      : "bottom-8 inset-x-10 text-center";
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-[var(--bg-base)] flex flex-col items-center justify-center overflow-hidden p-6"
+      className="fixed inset-0 z-50 bg-[var(--bg-base)] overflow-hidden"
       style={{
         cursor: controlsVisible ? "default" : "none",
       }}
     >
-      {/* Subtle auto-hiding exit & settings controls */}
+      {/* Subtle auto-hiding exit, wallpaper & settings controls */}
       <div
         className={`fixed top-5 right-5 z-20 flex items-center gap-2 transition-opacity duration-200 ${
           controlsVisible ? "opacity-100" : "opacity-0 pointer-events-none"
         }`}
       >
+        <button
+          type="button"
+          onClick={onToggleWallpaper}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold cursor-pointer"
+          style={
+            wallpaperMode
+              ? {
+                  background: "var(--bg-elevated)",
+                  color: "var(--accent)",
+                  border: "1px solid var(--accent)",
+                }
+              : {
+                  background: "var(--accent)",
+                  color: "var(--accent-contrast)",
+                }
+          }
+        >
+          <Wallpaper className="w-3.5 h-3.5" />
+          {wallpaperMode ? "Stop Wallpaper" : "Live Wallpaper"}
+        </button>
         <button
           type="button"
           onClick={onOpenSettings}
@@ -107,9 +133,7 @@ export function CinematicOverlay({
         </button>
       </div>
 
-      {config.titlePosition === "above" && titleBlock}
-
-      <div className="flex-1 w-full min-h-0 flex items-center justify-center">
+      <div className="w-full h-full relative">
         <CircularVisualizerCanvas
           config={config}
           analyserRef={analyserRef}
@@ -118,9 +142,34 @@ export function CinematicOverlay({
           themeId={themeId}
           coverUrl={coverUrl}
         />
-      </div>
 
-      {config.titlePosition === "below" && titleBlock}
+        {config.titlePosition !== "hidden" && (displayTitle || displayArtist) && (
+          <div className={`absolute z-10 pointer-events-none select-none ${titlePosClass}`}>
+            <div
+              className={`inline-flex flex-col ${
+                config.titlePosition === "bottom-left" ? "items-start" : "items-center"
+              } px-4 py-2 rounded-xl bg-[var(--bg-elevated)]/85 border border-[var(--border-subtle)]`}
+            >
+              {displayTitle && (
+                <div
+                  className="font-bold tracking-tight text-[var(--text-primary)] leading-tight truncate max-w-full"
+                  style={{ fontSize: `${Math.round(24 * config.titleScale)}px` }}
+                >
+                  {displayTitle}
+                </div>
+              )}
+              {showSub && displayArtist && (
+                <div
+                  className="text-[var(--text-secondary)] mt-0.5 truncate max-w-full"
+                  style={{ fontSize: `${Math.round(14 * config.titleScale)}px` }}
+                >
+                  {displayArtist}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -1,5 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AudioDeviceInfo, AudioStatus, MonitorInfo } from "../types";
+import type {
+  AudioDeviceInfo,
+  AudioStatus,
+  MonitorInfo,
+  NowPlayingMedia,
+} from "../types";
 
 export const api = {
   async getFftFrame(): Promise<Uint8Array> {
@@ -15,6 +20,8 @@ export const api = {
 
   selectAudioDevice: (deviceId: string | null) =>
     invoke<void>("select_audio_device", { deviceId }),
+
+  getNowPlaying: () => invoke<NowPlayingMedia | null>("get_now_playing"),
 
   listMonitors: () => invoke<MonitorInfo[]>("list_monitors"),
 
@@ -44,6 +51,11 @@ export const api = {
 
   loadImageAsDataUrl: (path: string) =>
     invoke<string>("load_image_as_data_url", { path }),
+
+  saveTextFile: (path: string, content: string) =>
+    invoke<void>("save_text_file", { path, content }),
+
+  readTextFile: (path: string) => invoke<string>("read_text_file", { path }),
 
   hideMainWindow: () => invoke<void>("hide_main_window"),
 

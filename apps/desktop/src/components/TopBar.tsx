@@ -14,6 +14,7 @@ import {
   Sliders,
   Square,
   Tv,
+  Wallpaper,
   X,
 } from "lucide-react";
 
@@ -25,11 +26,13 @@ interface TopBarProps {
   syncProgress?: SyncProgressEvent | null;
   isServerConnected: boolean;
   isFullscreen: boolean;
+  wallpaperMode: boolean;
   onAddFolder: () => void;
   onRescan: () => void;
   onSyncNow: () => void;
   onOpenThemes: () => void;
   onEnterCinematic: () => void;
+  onToggleWallpaper: () => void;
   onOpenCinematicSettings: () => void;
   onToggleFullscreen: () => void;
   onBeforeClose: () => Promise<void>;
@@ -44,11 +47,13 @@ export const TopBar = memo(function TopBar({
   syncProgress,
   isServerConnected,
   isFullscreen,
+  wallpaperMode,
   onAddFolder,
   onRescan,
   onSyncNow,
   onOpenThemes,
   onEnterCinematic,
+  onToggleWallpaper,
   onOpenCinematicSettings,
   onToggleFullscreen,
   onBeforeClose,
@@ -162,7 +167,7 @@ export const TopBar = memo(function TopBar({
           </button>
         )}
 
-        {/* Cinematic Mode + Studio Gear */}
+        {/* Cinematic Mode + Live Wallpaper + Studio Gear */}
         <div className="flex items-center rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] overflow-hidden">
           <button
             type="button"
@@ -175,8 +180,21 @@ export const TopBar = memo(function TopBar({
           </button>
           <button
             type="button"
+            onClick={onToggleWallpaper}
+            title={wallpaperMode ? "Stop Live Desktop Wallpaper" : "Toggle Live Desktop Wallpaper Mode"}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 border-l border-[var(--border-subtle)] text-xs font-medium transition-colors cursor-pointer ${
+              wallpaperMode
+                ? "bg-[var(--accent-soft)] text-[var(--accent)]"
+                : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+            }`}
+          >
+            <Wallpaper className="w-3.5 h-3.5" />
+            <span className="hidden xl:inline">{wallpaperMode ? "Wallpaper On" : "Wallpaper"}</span>
+          </button>
+          <button
+            type="button"
             onClick={onOpenCinematicSettings}
-            title="Cinematic Visualizer Settings"
+            title="Cinematic & Wallpaper Studio"
             className="px-2 py-1.5 border-l border-[var(--border-subtle)] text-[var(--text-secondary)] hover:text-[var(--accent)] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer"
           >
             <Sliders className="w-3.5 h-3.5" />

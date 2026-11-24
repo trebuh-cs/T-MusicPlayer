@@ -12,30 +12,41 @@ import {
 import tpxLogoUrl from "./assets/tpx-logo.svg";
 import { CircularVisualizerCanvas } from "./components/CircularVisualizerCanvas";
 import { CustomizeStudioModal } from "./components/CustomizeStudioModal";
+import { NowPlayingOverlay } from "./components/NowPlayingOverlay";
 import { api } from "./services/api";
 import { applyThemeToDocument, getThemeById } from "./themes";
 import {
   DEFAULT_VISUALIZER_CONFIG,
+  mergeVisualizerConfig,
   type AudioDeviceInfo,
   type AudioStatus,
   type MonitorInfo,
+  type NowPlayingMedia,
+  type SavedVisualizerTheme,
   type VisualizerConfig,
 } from "./types";
 
 const STORAGE_KEY = "t_visualizer_config_v1";
+const PRESETS_STORAGE_KEY = "t_visualizer_saved_themes_v1";
 
 function loadSavedConfig(): VisualizerConfig {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULT_VISUALIZER_CONFIG;
-    const parsed = JSON.parse(raw) as Partial<VisualizerConfig>;
-    // Migrate legacy "all" (stretched) to "mirrored" (native per-monitor)
-    if (parsed.selectedMonitorId === "all") {
-      parsed.selectedMonitorId = "mirrored";
-    }
-    return { ...DEFAULT_VISUALIZER_CONFIG, ...parsed };
+    return mergeVisualizerConfig(JSON.parse(raw) as Partial<VisualizerConfig>);
   } catch {
     return DEFAULT_VISUALIZER_CONFIG;
+  }
+}
+
+function loadSavedThemes(): SavedVisualizerTheme[] {
+  try {
+    const raw = localStorage.getItem(PRESETS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as SavedVisualizerTheme[]) : [];
+  } catch {
+    return [];
   }
 }
 
@@ -49,11 +60,12 @@ function isWallpaperSurfaceWindow(): boolean {
 
 /**
  * Pure full-bleed wallpaper surface rendered on each individual monitor in Live Wallpaper Mode.
- * Zero HUD, zero margins, synced live with the main Customize Studio.
+ * Zero HUD, zero margins, synced live with the main Customize Studio & Windows GSMTC Now Playing.
  */
 function WallpaperSurfaceApp() {
   const [config, setConfig] = useState<VisualizerConfig>(() => loadSavedConfig());
   const [hasAudioSignal, setHasAudioSignal] = useState(false);
+  const [nowPlaying, setNowPlaying] = useState<NowPlayingMedia | null>(null);
   const liveFftRef = useRef<Uint8Array>(new Uint8Array(256));
 
   useEffect(() => {
@@ -68,8 +80,7 @@ function WallpaperSurfaceApp() {
       .then((json) => {
         if (!json) return;
         try {
-          const parsed = JSON.parse(json) as Partial<VisualizerConfig>;
-          setConfig({ ...DEFAULT_VISUALIZER_CONFIG, ...parsed });
+          setConfig(mergeVisualizerConfig(JSON.parse(json) as Partial<VisualizerConfig>));
         } catch {
           // Ignore malformed JSON
         }
@@ -78,8 +89,7 @@ function WallpaperSurfaceApp() {
 
     void listen<string>("visualizer-config-sync", (event) => {
       try {
-        const parsed = JSON.parse(event.payload) as Partial<VisualizerConfig>;
-        setConfig({ ...DEFAULT_VISUALIZER_CONFIG, ...parsed });
+        setConfig(mergeVisualizerConfig(JSON.parse(event.payload) as Partial<VisualizerConfig>));
       } catch {
         // Ignore malformed JSON
       }
@@ -89,6 +99,25 @@ function WallpaperSurfaceApp() {
 
     return () => {
       unlisten?.();
+    };
+  }, []);
+
+  // Poll Windows GSMTC Now Playing (Spotify, Chrome/YouTube, etc.)
+  useEffect(() => {
+    let active = true;
+    const poll = () => {
+      void api
+        .getNowPlaying()
+        .then((m) => {
+          if (active) setNowPlaying(m);
+        })
+        .catch(() => {});
+    };
+    poll();
+    const id = window.setInterval(poll, 1200);
+    return () => {
+      active = false;
+      window.clearInterval(id);
     };
   }, []);
 
@@ -146,48 +175,28 @@ function WallpaperSurfaceApp() {
 
   return (
     <div className="fixed inset-0 w-screen h-screen overflow-hidden bg-[var(--bg-base)] select-none">
-      {config.titlePosition === "above" && config.customTitle.trim() && (
-        <div className="absolute top-12 inset-x-8 z-10 text-center pointer-events-none">
-          <div className="text-2xl font-bold tracking-tight text-[var(--text-primary)]">
-            {config.customTitle}
-          </div>
-          {config.showSubtitle && config.customSubtitle.trim() && (
-            <div className="text-sm text-[var(--text-secondary)] mt-1">
-              {config.customSubtitle}
-            </div>
-          )}
-        </div>
-      )}
-
       <CircularVisualizerCanvas
         config={config}
         liveFftRef={liveFftRef}
         hasAudioSignal={hasAudioSignal}
+        albumArtUrl={nowPlaying?.thumbnail_data_url ?? null}
       />
-
-      {config.titlePosition === "below" && config.customTitle.trim() && (
-        <div className="absolute bottom-12 inset-x-8 z-10 text-center pointer-events-none">
-          <div className="text-2xl font-bold tracking-tight text-[var(--text-primary)]">
-            {config.customTitle}
-          </div>
-          {config.showSubtitle && config.customSubtitle.trim() && (
-            <div className="text-sm text-[var(--text-secondary)] mt-1">
-              {config.customSubtitle}
-            </div>
-          )}
-        </div>
-      )}
+      <NowPlayingOverlay config={config} nowPlaying={nowPlaying} />
     </div>
   );
 }
 
 function MainApp() {
   const [config, setConfig] = useState<VisualizerConfig>(() => loadSavedConfig());
+  const [savedThemes, setSavedThemes] = useState<SavedVisualizerTheme[]>(() =>
+    loadSavedThemes()
+  );
   const [studioOpen, setStudioOpen] = useState(false);
   const [wallpaperMode, setWallpaperMode] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [hudVisible, setHudVisible] = useState(true);
   const [audioStatus, setAudioStatus] = useState<AudioStatus | null>(null);
+  const [nowPlaying, setNowPlaying] = useState<NowPlayingMedia | null>(null);
   const [hasAudioSignal, setHasAudioSignal] = useState(false);
   const [devices, setDevices] = useState<AudioDeviceInfo[]>([]);
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
@@ -209,12 +218,10 @@ function MainApp() {
     }, 3600);
   }, []);
 
-  // Apply theme CSS vars immediately whenever theme changes
   useEffect(() => {
     applyThemeToDocument(getThemeById(config.themeId));
   }, [config.themeId]);
 
-  // Persist config to localStorage AND broadcast live to all active wallpaper surfaces
   useEffect(() => {
     const serialized = JSON.stringify(config);
     void api.syncVisualizerConfig(serialized).catch(() => {});
@@ -234,26 +241,36 @@ function MainApp() {
     }
   }, [config]);
 
+  const handleSaveThemes = useCallback((next: SavedVisualizerTheme[]) => {
+    setSavedThemes(next);
+    try {
+      localStorage.setItem(PRESETS_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, []);
+
   const refreshHardware = useCallback(async () => {
     try {
-      const [devs, mons, wpActive, fsActive, status] = await Promise.all([
+      const [devs, mons, wpActive, fsActive, status, media] = await Promise.all([
         api.listAudioDevices(),
         api.listMonitors(),
         api.isWallpaperMode(),
         api.isWindowFullscreen(),
         api.getAudioStatus(),
+        api.getNowPlaying(),
       ]);
       setDevices(devs);
       setMonitors(mons);
       setWallpaperMode(wpActive);
       setIsFullscreen(fsActive);
       setAudioStatus(status);
+      setNowPlaying(media);
     } catch {
       // Ignore during initial mount
     }
   }, []);
 
-  // Initial sync of hardware + saved audio device selection
   useEffect(() => {
     void refreshHardware();
     if (configRef.current.selectedDeviceId) {
@@ -261,7 +278,6 @@ function MainApp() {
     }
   }, [refreshHardware]);
 
-  // Subscribe to Tauri system tray events
   useEffect(() => {
     let unlistenWp: (() => void) | null = null;
     let unlistenStudio: (() => void) | null = null;
@@ -343,18 +359,21 @@ function MainApp() {
     };
   }, []);
 
-  // Poll audio capture status every 1.5s
+  // Poll audio capture status & Windows GSMTC Now Playing
   useEffect(() => {
     const id = window.setInterval(() => {
       void api
         .getAudioStatus()
         .then((s) => setAudioStatus(s))
         .catch(() => {});
-    }, 1500);
+      void api
+        .getNowPlaying()
+        .then((m) => setNowPlaying(m))
+        .catch(() => {});
+    }, 1200);
     return () => window.clearInterval(id);
   }, []);
 
-  // Auto-hide HUD after mouse inactivity when not in studio
   const bumpHud = useCallback(() => {
     setHudVisible(true);
     if (hideTimerRef.current !== null) {
@@ -388,7 +407,6 @@ function MainApp() {
   const handleToggleWallpaper = useCallback(async () => {
     try {
       const target = !wallpaperMode;
-      // Ensure latest config is synced before spawning wallpaper surfaces
       await api.syncVisualizerConfig(JSON.stringify(configRef.current));
       const active = await api.setWallpaperMode(
         target,
@@ -412,10 +430,12 @@ function MainApp() {
     async (monitorId: string | null) => {
       if (!wallpaperMode) return;
       try {
-        await api.syncVisualizerConfig(JSON.stringify({
-          ...configRef.current,
-          selectedMonitorId: monitorId,
-        }));
+        await api.syncVisualizerConfig(
+          JSON.stringify({
+            ...configRef.current,
+            selectedMonitorId: monitorId,
+          })
+        );
         await api.setWallpaperMode(true, monitorId, true);
         showToast("Wallpaper monitor layout updated");
       } catch (err) {
@@ -438,7 +458,6 @@ function MainApp() {
     [showToast]
   );
 
-  // Global hotkeys: F11 fullscreen, Esc close studio / exit fullscreen, C customize
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName;
@@ -472,7 +491,6 @@ function MainApp() {
 
   const handleCloseButton = () => {
     if (wallpaperMode) {
-      // Keep live wallpapers running cleanly in the background; hide Studio back to tray.
       void api.hideMainWindow();
     } else {
       void api.quitApp();
@@ -485,7 +503,7 @@ function MainApp() {
       onMouseMove={bumpHud}
       onMouseDown={bumpHud}
     >
-      {/* Full-bleed Live Audio Circular Visualizer */}
+      {/* Full-bleed Multi-Style Live Audio Visualizer */}
       <div
         className="w-full h-full relative"
         onDoubleClick={() => {
@@ -494,37 +512,13 @@ function MainApp() {
           }
         }}
       >
-        {config.titlePosition === "above" && config.customTitle.trim() && (
-          <div className="absolute top-12 inset-x-8 z-10 text-center pointer-events-none">
-            <div className="text-2xl font-bold tracking-tight text-[var(--text-primary)]">
-              {config.customTitle}
-            </div>
-            {config.showSubtitle && config.customSubtitle.trim() && (
-              <div className="text-sm text-[var(--text-secondary)] mt-1">
-                {config.customSubtitle}
-              </div>
-            )}
-          </div>
-        )}
-
         <CircularVisualizerCanvas
           config={config}
           liveFftRef={liveFftRef}
           hasAudioSignal={hasAudioSignal}
+          albumArtUrl={nowPlaying?.thumbnail_data_url ?? null}
         />
-
-        {config.titlePosition === "below" && config.customTitle.trim() && (
-          <div className="absolute bottom-12 inset-x-8 z-10 text-center pointer-events-none">
-            <div className="text-2xl font-bold tracking-tight text-[var(--text-primary)]">
-              {config.customTitle}
-            </div>
-            {config.showSubtitle && config.customSubtitle.trim() && (
-              <div className="text-sm text-[var(--text-secondary)] mt-1">
-                {config.customSubtitle}
-              </div>
-            )}
-          </div>
-        )}
+        <NowPlayingOverlay config={config} nowPlaying={nowPlaying} />
       </div>
 
       {/* Auto-hiding Matte Top HUD Bar */}
@@ -534,7 +528,6 @@ function MainApp() {
           hudVisible || studioOpen ? "opacity-100" : "opacity-0 pointer-events-none"
         }`}
       >
-        {/* Left: App Brand + Live System Audio Indicator (Draggable) */}
         <div
           data-tauri-drag-region
           className="flex items-center gap-3 min-w-0 flex-1 h-full"
@@ -548,7 +541,7 @@ function MainApp() {
             T - Visualizer
           </span>
 
-          <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[var(--text-secondary)] max-w-[300px] pointer-events-none">
+          <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[var(--text-secondary)] max-w-[340px] pointer-events-none">
             <span
               className="w-2 h-2 rounded-full shrink-0"
               style={{
@@ -560,16 +553,17 @@ function MainApp() {
               }}
             />
             <span className="truncate">
-              {hasAudioSignal
+              {nowPlaying && (nowPlaying.title || nowPlaying.artist)
+                ? `${nowPlaying.source_app}: ${nowPlaying.title}${
+                    nowPlaying.artist ? ` — ${nowPlaying.artist}` : ""
+                  }`
+                : hasAudioSignal
                 ? `Live: ${audioStatus?.device_name ?? "System Audio"}`
-                : audioStatus?.error
-                ? "Audio Error"
                 : `Listening: ${audioStatus?.device_name ?? "System Default"}`}
             </span>
           </span>
         </div>
 
-        {/* Right: Controls */}
         <div className="flex items-center gap-1.5 shrink-0">
           <button
             type="button"
@@ -586,11 +580,6 @@ function MainApp() {
                     background: "var(--accent)",
                     color: "var(--accent-contrast)",
                   }
-            }
-            title={
-              wallpaperMode
-                ? "Stop Live Desktop Wallpaper"
-                : "Run visualizer behind Windows desktop icons (Tray icon to restore)"
             }
           >
             <Wallpaper className="w-3.5 h-3.5" />
@@ -654,24 +643,25 @@ function MainApp() {
         </div>
       </header>
 
-      {/* Subtle status toast */}
       {statusToast && (
         <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-40 px-4 py-2 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)]">
           {statusToast}
         </div>
       )}
 
-      {/* Customize Studio Modal */}
       {studioOpen && (
         <CustomizeStudioModal
           config={config}
           onChange={setConfig}
+          savedThemes={savedThemes}
+          onSaveThemes={handleSaveThemes}
           onClose={() => setStudioOpen(false)}
           onToggleWallpaper={() => void handleToggleWallpaper()}
           wallpaperMode={wallpaperMode}
           liveFftRef={liveFftRef}
           hasAudioSignal={hasAudioSignal}
           audioStatus={audioStatus}
+          nowPlaying={nowPlaying}
           devices={devices}
           monitors={monitors}
           onRefreshHardware={() => void refreshHardware()}

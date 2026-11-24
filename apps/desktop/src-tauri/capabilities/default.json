@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default desktop permissions for T - MusicPlayer",
-  "windows": ["main"],
+  "description": "Default desktop permissions for T - MusicPlayer and live wallpaper surfaces",
+  "windows": ["main", "wallpaper-*"],
   "permissions": [
     "core:default",
     "core:window:allow-set-fullscreen",

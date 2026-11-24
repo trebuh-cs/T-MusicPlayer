@@ -5,6 +5,7 @@ import type {
   DetectedPlaylistFile,
   ImportPlaylistReport,
   LibrarySnapshot,
+  MonitorInfo,
   ParsedPlaylist,
   Playlist,
   RadioStation,
@@ -134,6 +135,26 @@ export const api = {
     invoke<void>("reveal_track_in_explorer", { trackId }),
   exportTrackAsMp3: (trackId: string, destPath: string) =>
     invoke<string>("export_track_as_mp3", { trackId, destPath }),
+  listMonitors: () => invoke<MonitorInfo[]>("list_monitors"),
+  isWallpaperMode: () => invoke<boolean>("is_wallpaper_mode"),
+  setWallpaperMode: (enabled: boolean, monitorId: string | null) =>
+    invoke<boolean>("set_wallpaper_mode", { enabled, monitorId }),
+  pushWallpaperFft: (bins: number[]) =>
+    invoke<void>("push_wallpaper_fft", { bins }),
+  async getWallpaperFft(): Promise<Uint8Array> {
+    const raw = await invoke<ArrayBuffer | number[] | Uint8Array>("get_wallpaper_fft");
+    if (raw instanceof Uint8Array) return raw;
+    if (raw instanceof ArrayBuffer) return new Uint8Array(raw);
+    return new Uint8Array(raw);
+  },
+  syncWallpaperPayload: (payloadJson: string) =>
+    invoke<void>("sync_wallpaper_payload", { payloadJson }),
+  getWallpaperPayload: () => invoke<string | null>("get_wallpaper_payload"),
+  loadImageAsDataUrl: (path: string) =>
+    invoke<string>("load_image_as_data_url", { path }),
+  saveTextFile: (path: string, content: string) =>
+    invoke<void>("save_text_file", { path, content }),
+  readTextFile: (path: string) => invoke<string>("read_text_file", { path }),
 };
 
 // Legal Internet Radio discovery via public Radio Browser mirrors.

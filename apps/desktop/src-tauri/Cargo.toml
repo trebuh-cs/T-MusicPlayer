@@ -1,7 +1,7 @@
 [package]
 name = "t-music-desktop"
 version = "0.1.0"
-description = "Lightweight desktop music player with WMP import, themes, visualizer, and Internet Radio"
+description = "Lightweight desktop music player with WMP import, themes, multi-style visualizer, Live Wallpaper mode, and Internet Radio"
 authors = ["Tristan"]
 edition = "2021"
 
@@ -13,6 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+base64 = "0.22"
 chrono = "0.4"
 dirs = "5"
 http = "1"
@@ -24,6 +25,13 @@ t-music-core = { path = "../../../crates/t-music-core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
