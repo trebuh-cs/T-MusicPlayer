@@ -1419,6 +1419,14 @@ export function CustomizeStudioModal({
                         checked={config.roundedCaps}
                         onToggle={() => patch("roundedCaps", !config.roundedCaps)}
                       />
+                      <ToggleRow
+                        label="No Music, No Spinning"
+                        description="Pause circle rotation when audio is silent"
+                        checked={config.stopSpinOnSilence}
+                        onToggle={() =>
+                          patch("stopSpinOnSilence", !config.stopSpinOnSilence)
+                        }
+                      />
                     </div>
                   </section>
 

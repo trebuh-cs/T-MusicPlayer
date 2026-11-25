@@ -279,8 +279,10 @@ export class VisualizerRenderer {
     const activeMotion = hasLiveFft || useSimulation;
     const bass = this.computeBassEnergy(freqData, hasLiveFft, useSimulation, now);
 
-    if (activeMotion) {
+    if (activeMotion || !cfg.stopSpinOnSilence) {
       this.rotation += cfg.rotationSpeed * dt * 0.45;
+    }
+    if (activeMotion) {
       this.synthPhase += dt * (0.65 + cfg.synthWaveSpeed * 1.15);
     }
 

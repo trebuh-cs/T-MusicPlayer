@@ -127,6 +127,7 @@ export interface VisualizerConfig {
   bidirectionalBars: boolean;
   roundedCaps: boolean;
   rotationSpeed: number;
+  stopSpinOnSilence: boolean;
   colorMode: VisualizerColorMode;
   barColorLow: string;
   barColorMid: string;
@@ -263,6 +264,7 @@ export const DEFAULT_VISUALIZER_CONFIG: VisualizerConfig = {
   bidirectionalBars: false,
   roundedCaps: true,
   rotationSpeed: 0.15,
+  stopSpinOnSilence: false,
   colorMode: "theme",
   barColorLow: "#0AF92A",
   barColorMid: "#49ECC1",
